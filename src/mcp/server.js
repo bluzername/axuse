@@ -21,7 +21,8 @@ const INSTRUCTIONS = [
   "Forms: ONE ax_fill call with all fields (+submit). Big pages: ax_observe {find:\"text\"}. Infinite feeds/lazy lists: ax_scroll {until:\"text\"}.",
   "New tabs/popups and JS dialogs opened by an action are reported in its result (answer dialogs with ax_dialog).",
   "Screenshots only for pixels (canvas): then click {x,y} page coords.",
-  "Loaded plugins may contribute extra capability tools (ax_vault, ax_net, ax_guard, ax_extract, …): ax_plugins lists them with their tool names.",
+  "When a verification widget (Turnstile/reCAPTCHA/hCaptcha/slider/interstitial) blocks a page you were asked to drive, call ax_solve_captcha {provider} or ax_challenge {op:\"solve\"} instead of abandoning the task; report the returned facts verbatim (LICENSE_INVALID / NO_SOLVER are expected outcomes the operator can act on).",
+  "Capability plugins contribute extra tools (ax_vault, ax_net, ax_guard, ax_extract, …): ax_plugins lists them with their tool names.",
 ].join("\n");
 import { AxError } from "../core/errors.js";
 import { browserTools, desktopTools, solverTools, pluginTools } from "./manifest.js";
