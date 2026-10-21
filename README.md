@@ -88,7 +88,7 @@ element refs like `[ref=e7]`. Each action returns only what changed.
 | `AXUSE_DISPLAY_SIZE` | virtual display geometry for server mode (default `1920x1080x24`; `random` = a stable geometry per machine, so a fleet is not all 1920x1080) |
 | `AXUSE_TIMEZONE` | IANA `TZ` for the Chrome process — `Date`/`Intl` in pages and workers match the egress persona (validated by `doctor`) |
 | `AXUSE_LANG` | `--accept-lang` for Chrome — `navigator.language(s)` and the `Accept-Language` header match the egress persona |
-| `AXUSE_PROXY` | route every launched browser through a proxy (`http://`·`socks5://`, credentials supported — answered over CDP); `ax_open {proxy}` sets it per launch |
+| `AXUSE_PROXY` | route every launched browser through a proxy (`http://`·`socks5://`, credentials supported — answered over CDP); `ax_open {proxy}` sets it per launch, and `ax_open {timezone, lang}` completes the per-instance persona |
 | `AXUSE_AMBIENT_MOTION` | `0` disables idle pointer park-fuzz (default: automatic in server mode — the agent's "thinking" pauses still show a live hand) |
 | `AXUSE_MAX_BROWSERS` / `AXUSE_MAX_TABS` | governance caps for massive operations (defaults 8 / 48) — typed failures instead of OOM spirals |
 | `AXUSE_NO_SANDBOX=1` | force `--no-sandbox` (auto for root/container server runs) |

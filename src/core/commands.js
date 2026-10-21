@@ -30,6 +30,8 @@ export const Contract = Object.freeze({
       headless: { t: "boolean", desc: "No window (cdp backend). On a display-less Linux server axuse auto-boots a virtual display and stays headed (anti-bot-safe) — keep headless off for challenge pages; use it only for trusted internal pages." },
       proxy: { t: "string", desc: 'Route this browser through a proxy: "http://host:port", "socks5://user:pass@host:port" (per-launch, credentials answered over CDP; loopback bypassed by default; AXUSE_PROXY otherwise).' },
       proxy_bypass: { t: "string", desc: 'Chrome proxy bypass list (advanced), e.g. "<-loopback>" to include localhost.' },
+      timezone: { t: "string", desc: 'Per-instance IANA persona zone (e.g. "America/New_York") — Date/Intl in pages and workers; overrides AXUSE_TIMEZONE for this browser (one coherent persona per exit).' },
+      lang: { t: "string", desc: 'Per-instance persona language (e.g. "en-GB") — navigator.languages + Accept-Language + Intl; overrides AXUSE_LANG for this browser.' },
       cdp_url: { t: "string", desc: 'Attach instead of launching, e.g. "http://127.0.0.1:9222".' },
       backend: { t: "enum", values: ["cdp", "extension"], desc: "Omit for auto (extension when connected, else cdp; AXUSE_BACKEND pins it). cdp = separate, not-signed-in browser." },
       executable_path: { t: "string", desc: "Browser binary (default: auto-detect)." },

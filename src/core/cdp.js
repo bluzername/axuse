@@ -9,7 +9,7 @@
  * dependency-free — important for a library that harnesses vendor via MCP.
  */
 import { spawn } from "node:child_process";
-import { accessSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statfsSync, statSync } from "node:fs";
+import { accessSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statfsSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { AxError, Codes } from "./errors.js";
@@ -436,13 +436,14 @@ export class BrowserHandle {
       // include localhost for proxy testing.
       const bypass = proxyBypass ?? process.env.AXUSE_PROXY_BYPASS;
       if (bypass) args.push(`--proxy-bypass-list=${bypass}`);
-      // WebRTC leak fix (the classic mismatch detector): without this,
-      // STUN/srflx candidates still leave through the REAL interface —
-      // the page sees the proxy IP on HTTP and the datacenter IP on
-      // WebRTC in the same session. With the policy, WebRTC only uses
-      // proxied paths; mDNS-obfuscated host candidates remain, so the
-      // surface stays indistinguishable from a real Chrome behind a VPN.
-      args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+      // WebRTC leak fix (measured live, Chrome 151): STUN/srflx candidates
+      // otherwise leave through the REAL interface — the page sees the
+      // proxy IP on HTTP and the datacenter IP on WebRTC in one session.
+      // The --force-webrtc-ip-handling-policy switch is IGNORED by current
+      // builds (measured: STUN went direct, zero proxy CONNECTs); the
+      // webrtc.ip_handling_policy PROFILE PREF is honored (measured: zero
+      // candidates through a proxied launch). Written below, into the
+      // profile, before spawn.
     }
     // Quiet egress (server/proxied lanes): Chrome's own background traffic
     // (component updates, metrics, domain reliability, phishing lookups,
@@ -512,6 +513,20 @@ export class BrowserHandle {
     if (localeTag) {
       childEnv.LC_ALL = localeTag;
       childEnv.LANG = localeTag;
+    }
+    // WebRTC leak fix (proxied launches): the honored mechanism is the
+    // webrtc.ip_handling_policy profile PREF (the command-line switch is
+    // ignored by current builds — measured). Merge into an existing
+    // persistent profile's Preferences; write fresh for ephemeral ones.
+    if (proxySpec) {
+      try {
+        const prefsPath = join(dir, "Default", "Preferences");
+        let prefs = {};
+        try { prefs = JSON.parse(readFileSync(prefsPath, "utf8") || "{}"); } catch { /* fresh profile */ }
+        prefs.webrtc = { ...(prefs.webrtc ?? {}), ip_handling_policy: "disable_non_proxied_udp" };
+        mkdirSync(join(dir, "Default"), { recursive: true });
+        writeFileSync(prefsPath, JSON.stringify(prefs));
+      } catch { /* unwritable profile: posture will warn about the leak */ }
     }
     const proc = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: false, env: childEnv });
     let wsUrl;
@@ -634,17 +649,42 @@ export class BrowserHandle {
   async createTab(url = "about:blank", { autoAttach = true } = {}) {
     const { targetId } = await this.conn.send("Target.createTarget", { url });
     const attached = await this.attachTab(targetId, { autoAttach });
-    // Now that OUR first tab exists, the browser's startup page(s) can go —
-    // every remaining page target is one axuse created and tracks (the
-    // "visible tabs, no orphan tabs" promise). Closing them EARLIER, while
-    // the startup page is the last page, could terminate the browser.
+    // Close the STARTUP pages recorded at launch — and only those. They
+    // predate every controller tab, so this can never touch a live tab
+    // (the generic sweepStrayPages is for teardown paths, where the
+    // controller passes the registered-tab keep list). Verified with a
+    // re-list and a second pass: under load a single Target.closeTarget
+    // can fail or lag silently.
     if (this.startupPages?.length) {
-      for (const t of this.startupPages) {
-        try { await this.conn.send("Target.closeTarget", { targetId: t }); } catch {}
+      for (let pass = 0; pass < 2; pass++) {
+        const { targetInfos } = await this.conn.send("Target.getTargets", {}).catch(() => ({ targetInfos: [] }));
+        const alive = new Set(targetInfos.filter((ti) => ti.type === "page").map((ti) => ti.targetId));
+        const doomed = this.startupPages.filter((id) => alive.has(id));
+        if (!doomed.length) break;
+        for (const id of doomed) {
+          try { await this.conn.send("Target.closeTarget", { targetId: id }); } catch {}
+        }
       }
       this.startupPages = [];
     }
     return attached;
+  }
+
+  /** Close every page target not in `keep`, verified with a re-list and a
+   *  second pass (under load a single Target.closeTarget can fail or lag
+   *  silently; an aborted navigation can also leave a REPLACEMENT target
+   *  the caller never saw). Returns how many strays were closed. */
+  async sweepStrayPages(keep = []) {
+    let closed = 0;
+    for (let pass = 0; pass < 2; pass++) {
+      const { targetInfos } = await this.conn.send("Target.getTargets", {}).catch(() => ({ targetInfos: [] }));
+      const strays = targetInfos.filter((ti) => ti.type === "page" && !keep.includes(ti.targetId));
+      if (!strays.length) break;
+      for (const s of strays) {
+        try { await this.conn.send("Target.closeTarget", { targetId: s.targetId }); closed++; } catch {}
+      }
+    }
+    return closed;
   }
 
   /** Attach to an existing page target (e.g. a popup / target=_blank tab). */

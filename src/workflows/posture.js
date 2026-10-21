@@ -28,6 +28,8 @@ const POSTURE_EXPRESSION = `(() => {
     const ctx = new OfflineAudioContext(1, 4096, 44100);
     const o = ctx.createOscillator(); o.connect(ctx.destination); o.start(0);
   } catch (e) { audioOffline = false; }
+  let webrtcSupported = false;
+  try { webrtcSupported = typeof RTCPeerConnection !== "undefined"; } catch (e) {}
   return {
     ua: navigator.userAgent,
     webdriver: navigator.webdriver,
@@ -45,8 +47,49 @@ const POSTURE_EXPRESSION = `(() => {
     pdfViewer: navigator.pdfViewerEnabled === true,
     notifications: (typeof Notification !== "undefined" && Notification.permission) || "unsupported",
     audioOffline,
+    webrtcSupported,
   };
 })()`;
+
+/** WebRTC leak probe (proxied lanes): gather ICE candidates and classify
+ *  them — mDNS host candidates (.local) are fine (real Chrome behind a VPN
+ *  shows those too); any PUBLIC IP (srflx/relay of the real interface)
+ *  beside a proxied HTTP persona is the classic mismatch leak. Bounded:
+ *  never waits longer than ~4 s for the ICE state. Exported for tests. */
+export const WEBRTC_EXPRESSION = `(async () => {
+  if (typeof RTCPeerConnection === "undefined") return { supported: false, candidates: [] };
+  const cands = [];
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  try {
+    pc.createDataChannel("axuse-posture");
+    const gathered = new Promise((done) => {
+      pc.onicecandidate = (e) => {
+        if (!e.candidate) { done(); return; }
+        const m = /candidate:\\S+ \\d+ \\S+ \\d+ (\\S+) \\d+ typ (\\w+)/.exec(e.candidate.candidate || "");
+        if (m) cands.push({ ip: m[1], typ: m[2] });
+      };
+      setTimeout(done, 4000);
+    });
+    await pc.setLocalDescription(await pc.createOffer());
+    await Promise.race([gathered, new Promise((r) => setTimeout(r, 4500))]);
+  } catch (e) { /* ICE unavailable — reported as empty */ }
+  try { pc.close(); } catch (e) {}
+  return { supported: true, candidates: cands };
+})()`;
+
+/** Private-IP and mDNS classification: a candidate is a PERSONA CONTRADICTION
+ *  only when it carries a public, non-mDNS address next to a proxied exit. */
+export function publicIpCandidates(candidates) {
+  return (candidates ?? []).filter((c) => {
+    const ip = String(c.ip ?? "");
+    if (ip.endsWith(".local") || ip.includes(":")) return false; // mDNS / IPv6 local
+    const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(ip);
+    if (!m) return false;
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    if (a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)) return false;
+    return true;
+  });
+}
 
 const EGRESS_EXPRESSION = `(async () => {
   try {
@@ -59,14 +102,20 @@ const EGRESS_EXPRESSION = `(async () => {
 const GEO_URL = (ip) => (process.env.AXUSE_EGRESS_GEO_URL ?? `https://ipapi.co/{ip}/json/`).replace("{ip}", encodeURIComponent(ip));
 
 /** Measure the live posture of the controller's active tab (opens one when
- *  none exists — the production lane, server mode included). */
+ *  none exists — the production lane, server mode included). When the
+ *  browser is PROXIED, also probes the WebRTC surface: the one place a real
+ *  interface can leak next to a proxied persona. */
 export async function collectPosture(controller) {
   if (!controller.activeTabId) {
     await controller.execute("open", { url: "about:blank", settle_ms: 150 });
   }
   const facts = JSON.parse((await controller.execute("evaluate", { expression: POSTURE_EXPRESSION })).value ?? "null");
   const browser = [...controller.browsers.values()].at(-1);
-  return { facts, posture: controller.browserPosture(), browserId: browser?.browserId ?? null };
+  let webrtc = null;
+  if (browser?.egress && facts?.webrtcSupported) {
+    webrtc = JSON.parse((await controller.execute("evaluate", { expression: WEBRTC_EXPRESSION })).value ?? "null");
+  }
+  return { facts, webrtc, posture: controller.browserPosture(), browserId: browser?.browserId ?? null };
 }
 
 /** In-browser egress check (opt-in): the IP the EXIT sees, and — when a geo
@@ -94,14 +143,17 @@ const regionOf = (v) => {
   return m ? m[1].toUpperCase() : "";
 };
 
-/** Pure: facts × env → verdicts. The rules the tests pin, in one place. */
-export function judgePosture({ facts, posture, egress }, env = process.env) {
+/** Pure: facts × env → verdicts. The rules the tests pin, in one place.
+ *  Persona expectations resolve PER-INSTANCE first (open {timezone, lang} /
+ *  the browser record's persona), then process env, then info. */
+export function judgePosture({ facts, posture, egress, webrtc }, env = process.env) {
   const checks = [];
   const add = (id, status, detail) => checks.push({ id, status, detail });
   if (!facts) {
     add("facts", "fail", "no in-page facts collected — the browser lane is broken");
     return { checks, failures: 1, warnings: 0 };
   }
+  const persona = posture?.persona ?? {};
   // Critical: the headless class of signals.
   add("user-agent", /headless/i.test(facts.ua) ? "fail" : "pass",
     /headless/i.test(facts.ua) ? "UA contains Headless — the exact first-step detection signal" : `headed (${facts.ua.replace(/^.*?\(([^)]*\)).*$/, "$1")})`);
@@ -114,15 +166,15 @@ export function judgePosture({ facts, posture, egress }, env = process.env) {
     facts.webgl ? `present (${String(facts.renderer).slice(0, 60)})` : "absent — a strong bot signal on GPU-less hosts (--enable-unsafe-swiftshader should restore it)");
   add("pdf-plugins", facts.pdfViewer && facts.plugins > 0 ? "pass" : "warn",
     facts.pdfViewer && facts.plugins > 0 ? `${facts.plugins} plugins, PDF viewer enabled (headed build shape)` : "no PDF plugin — headless-like plugin surface");
-  // Persona coherence: clock, languages, viewport.
-  const wantTz = env.AXUSE_TIMEZONE;
+  // Persona coherence: clock, languages, viewport (per-instance first).
+  const wantTz = persona.timezone ?? env.AXUSE_TIMEZONE;
   if (wantTz) {
     add("timezone", facts.tz === wantTz ? "pass" : "fail",
-      facts.tz === wantTz ? `${facts.tz} (matches AXUSE_TIMEZONE)` : `page reports ${facts.tz}, AXUSE_TIMEZONE=${wantTz} — persona broken`);
+      facts.tz === wantTz ? `${facts.tz} (matches ${persona.timezone ? "the instance persona" : "AXUSE_TIMEZONE"})` : `page reports ${facts.tz}, expected ${wantTz} — persona broken`);
   } else {
-    add("timezone", "info", `${facts.tz} (host default — set AXUSE_TIMEZONE to the egress persona's zone)`);
+    add("timezone", "info", `${facts.tz} (host default — set a per-instance timezone or AXUSE_TIMEZONE to the egress persona's zone)`);
   }
-  const wantLang = env.AXUSE_LANG;
+  const wantLang = persona.lang ?? env.AXUSE_LANG;
   if (wantLang) {
     const langOk = langPrefix(facts.languages[0]) === langPrefix(wantLang) && regionOf(facts.languages[0] ?? "") === regionOf(wantLang);
     // Intl can legitimately drop the region (measured: LC_ALL=de_DE.UTF-8 →
@@ -139,7 +191,22 @@ export function judgePosture({ facts, posture, egress }, env = process.env) {
     add("language", "info", `navigator.languages=[${facts.languages.join(", ")}] · Intl=${facts.intl} (host defaults)`);
   }
   const vd = posture && typeof posture === "object" ? posture : {};
-  add("browser-shape", "info", `${vd.posture ?? "unknown"}${vd.display ? ` on ${vd.display}` : ""}${vd.egress ? ` · egress ${vd.egress}` : ""}`);
+  add("browser-shape", "info", `${vd.posture ?? "unknown"}${vd.display ? ` on ${vd.display}` : ""}${vd.egress ? ` · egress ${vd.egress}` : ""}${vd.persona?.timezone || vd.persona?.lang ? ` · persona ${[vd.persona.timezone, vd.persona.lang].filter(Boolean).join("/")}` : ""}`);
+  // WebRTC (proxied lanes only — the one place a real interface can leak
+  // next to a proxied persona; unproxied lanes honestly show their IP).
+  if (vd.egress) {
+    if (!facts.webrtcSupported) {
+      add("webrtc", "info", "RTCPeerConnection unavailable on this build");
+    } else if (!webrtc) {
+      add("webrtc", "info", "not probed");
+    } else {
+      const leak = publicIpCandidates(webrtc.candidates);
+      add("webrtc", leak.length ? "warn" : "pass",
+        leak.length
+          ? `LEAK: public WebRTC candidate(s) ${leak.map((c) => `${c.ip} (${c.typ})`).join(", ")} beside the proxied exit ${vd.egress} — disable_non_proxied_udp should suppress these (build ignored the policy?)`
+          : "no public candidates beside the proxied exit (mDNS host candidates only — a real VPN shape)");
+    }
+  }
   add("fingerprint-surface", "info",
     `cores=${facts.cores} memory=${facts.memory ?? "n/a"} viewport=${facts.viewport.w}x${facts.viewport.h}@dpr${facts.viewport.dpr} screen=${facts.screen.w}x${facts.screen.h}x${facts.screen.depth}`);
   add("audio", facts.audioOffline ? "pass" : "warn",

@@ -103,7 +103,7 @@ For one-shot / cron-style runs no service is needed — `axuse solve`,
 | `AXUSE_LANG` | `--accept-lang` for Chrome (verified live: `--lang` alone does **not** move `navigator.language`): sets `navigator.language`/`languages` **and** the `Accept-Language` header. |
 | `AXUSE_FP_CORES` / `AXUSE_FP_MEMORY` | Opt-in persona caps: a 96-core server's honest `hardwareConcurrency` is a persona mismatch for residential-looking traffic. `AXUSE_FP_CORES=8` overrides `navigator.hardwareConcurrency`; `AXUSE_FP_MEMORY` overrides `navigator.deviceMemory` — only where the platform exposes the API (never invents it). Honest hardware stays the default. |
 | `AXUSE_PROXY` | Per-process default for the per-launch `proxy` param: `"http://host:port"`, `"socks5://user:pass@host:port"` — one browser instance per spec, credentials answered over CDP. |
-| `AXUSE_PROXY_BYPASS` | Chrome proxy bypass list override (default: loopback bypassed so local fixtures work; `"<-loopback>"` includes localhost). |
+| `AXUSE_PROXY_BYPASS` | Chrome proxy bypass list override (default: loopback bypassed so local fixtures work; `"<-loopback>"` includes localhost). Proxied launches also get the WebRTC `disable_non_proxied_udp` profile pref (measured: the command-line switch is ignored) and quiet-egress flags (no background component/metrics traffic through the persona). |
 | `AXUSE_AMBIENT_MOTION` | `0` disables idle pointer park-fuzz; default `auto` = on exactly in server mode. |
 | `AXUSE_MAX_BROWSERS` | Governance cap: concurrent launched browsers per process (default 8) — a per-proxy fan-out fails typed at the cap instead of OOM-killing the box. |
 | `AXUSE_MAX_TABS` | Governance cap: concurrent tabs per process (default 48). |
@@ -182,6 +182,31 @@ plugins where it matters:
   anchored to the last action position. It pauses for every
   pointer-holding command and whenever a dialog is open — precision always
   wins over entropy.
+
+## Per-instance personas (one process, N exits, N coherent identities)
+
+`ax_open {timezone, lang}` override `AXUSE_TIMEZONE`/`AXUSE_LANG` **per
+browser instance** — with per-launch `proxy`, one agent process hosts one
+coherent persona per exit (a Tokyo-clock browser through the Tokyo exit, a
+New-York-clock browser through the US exit, simultaneously). A different
+persona is a different browser (never a mutation of a live one); the same
+persona reuses its browser. Solver results and `axuse posture` report the
+instance persona.
+
+## WebRTC: the leak beside proxied personas (measured, then closed)
+
+With a proxy, HTTP leaves through the exit — but WebRTC STUN/srflx
+candidates otherwise leave through the **real interface**: the page sees
+the proxy IP on HTTP and the datacenter IP on WebRTC in one session (the
+classic VPN-leak mismatch detector). Measured on Chrome 151: the
+`--force-webrtc-ip-handling-policy` switch is **ignored** by current
+builds (STUN went direct, zero CONNECTs through the proxy); the
+`webrtc.ip_handling_policy` profile pref is **honored** (zero candidates
+through a proxied launch). axuse writes the pref into the profile (merged,
+never clobbering a persistent profile) whenever a launch is proxied —
+mDNS host candidates remain, so the surface is a real Chrome-behind-VPN
+shape, not a disabled one. `axuse posture` probes this live and warns on
+any public candidate beside a proxied exit.
 
 ## Egress: one browser, one proxy (per-instance routing)
 

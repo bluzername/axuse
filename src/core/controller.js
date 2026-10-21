@@ -479,7 +479,7 @@ export class Controller {
     }
     const headless = a.headless ?? /^(1|true)$/i.test(process.env.AXUSE_HEADLESS ?? "");
     const { backend, reason } = await this.resolveBackend(a, headless);
-    const browser = await this.ensureBrowser({ headless, cdpUrl: a.cdp_url, executablePath: a.executable_path, backend, profileDir: a.profile_dir, proxy: a.proxy, proxyBypass: a.proxy_bypass });
+    const browser = await this.ensureBrowser({ headless, cdpUrl: a.cdp_url, executablePath: a.executable_path, backend, profileDir: a.profile_dir, proxy: a.proxy, proxyBypass: a.proxy_bypass, timezone: a.timezone, lang: a.lang });
     const { targetId, sessionId } = await browser.handle.createTab("about:blank");
     let tab;
     try {
@@ -488,9 +488,13 @@ export class Controller {
       await this.navigateInTab(tab, url, a.settle_ms ?? 300);
     } catch (e) {
       // A failed open must not leak a blank tab nobody holds an id for
-      // (downloads end in ERR_ABORTED, hung navigations time out).
+      // (downloads end in ERR_ABORTED, hung navigations time out). An
+      // aborted navigation can also leave a REPLACEMENT target the id
+      // never pointed at — sweep every page we do not still track.
       if (tab) this.deregisterTab(tab);
       try { await browser.handle.closeTabTarget(targetId); } catch {}
+      const keep = [...this.tabs.values()].map((t) => t.targetId);
+      await browser.handle.sweepStrayPages(keep).catch(() => {});
       if (e instanceof AxError) {
         throw new AxError(e.code, `${e.message} The tab axuse created for it was closed.`,
           { ...e, facts: { ...(e.facts ?? {}), tab_closed: true } });
@@ -719,10 +723,11 @@ export class Controller {
       posture: headless ? "headless" : (vd.active ? "headed-on-virtual-display" : "headed"),
       ...(vd.active ? { display: vd.display } : {}),
       ...(rec.egress ? { egress: rec.egress } : {}),
+      ...(rec.persona ? { persona: rec.persona } : {}),
     };
   }
 
-  async ensureBrowser({ headless, cdpUrl, executablePath, backend, profileDir, proxy, proxyBypass }) {
+  async ensureBrowser({ headless, cdpUrl, executablePath, backend, profileDir, proxy, proxyBypass, timezone, lang }) {
     // Extension backend: the user's real Chrome through the axuse bridge
     // (Codex pattern: one browser, the user's own, tabs visible to them).
     if (backend === "extension") {
@@ -746,9 +751,12 @@ export class Controller {
     // unbounded fan-out of per-proxy browsers OOM-kills the box instead of
     // failing typed. AXUSE_MAX_BROWSERS (default 8) caps concurrent
     // launched browsers; reuse of an existing key is always allowed.
+    // The key includes the FULL per-instance persona (proxy + tz + lang):
+    // one process, one coherent persona per exit — and persona changes
+    // launch a new browser, never mutate a live one.
     const key = cdpUrl
       ? `attach:${cdpUrl}`
-      : `launch:${headless ? "headless" : "headed"}:${proxy ?? process.env.AXUSE_PROXY ?? "direct"}:${profileDir ?? "ephemeral"}`;
+      : `launch:${headless ? "headless" : "headed"}:${proxy ?? process.env.AXUSE_PROXY ?? "direct"}:${timezone ?? process.env.AXUSE_TIMEZONE ?? ""}:${lang ?? process.env.AXUSE_LANG ?? ""}:${profileDir ?? "ephemeral"}`;
     const maxBrowsers = Number(process.env.AXUSE_MAX_BROWSERS ?? 8);
     const existingByKey = this.browserIndex.get(key);
     if (!cdpUrl && !existingByKey && this.browsers.size >= maxBrowsers
@@ -768,15 +776,14 @@ export class Controller {
     }
     const handle = cdpUrl
       ? await BrowserHandle.attach(cdpUrl)
-      : await BrowserHandle.launch({ headless, executablePath, userDataDir: profileDir, proxy, proxyBypass });
+      : await BrowserHandle.launch({ headless, executablePath, userDataDir: profileDir, proxy, proxyBypass, timezone, lang });
     const browserId = `b${++this.browserSeq}`;
     const rec = { browserId, handle, tabs: new Set(), key };
-    // Egress fact for solver results (parseProxySpec strips credentials —
-    // only the scheme://host:port ever surfaces).
-    // Egress fact for solver results (parseProxySpec strips credentials —
-    // only the scheme://host:port ever surfaces).
+    // Egress + persona facts for solver results (parseProxySpec strips
+    // credentials — only the scheme://host:port ever surfaces).
     const egressSpec = parseProxySpec(proxy ?? process.env.AXUSE_PROXY ?? "");
     if (egressSpec) rec.egress = egressSpec.server;
+    if (timezone || lang) rec.persona = { ...(timezone ? { timezone } : {}), ...(lang ? { lang } : {}) };
     this.browsers.set(browserId, rec);
     this.browserIndex.set(key, browserId);
     await this.watchPopups(rec);

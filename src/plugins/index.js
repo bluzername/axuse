@@ -319,7 +319,7 @@ export function buildSolveContext(controller, tabId) {
       }));
     },
     /** Open a URL in a new tab (profileDir: persistent A2 profile). */
-    async open(url, { headless, profileDir, settleMs, executablePath, proxy, proxyBypass } = {}) {
+    async open(url, { headless, profileDir, settleMs, executablePath, proxy, proxyBypass, timezone, lang } = {}) {
       const r = await controller.execute("open", {
         url: String(url),
         ...(headless !== undefined ? { headless } : {}),
@@ -328,6 +328,8 @@ export function buildSolveContext(controller, tabId) {
         ...(executablePath !== undefined ? { executable_path: executablePath } : {}),
         ...(proxy !== undefined ? { proxy } : {}),
         ...(proxyBypass !== undefined ? { proxy_bypass: proxyBypass } : {}),
+        ...(timezone !== undefined ? { timezone } : {}),
+        ...(lang !== undefined ? { lang } : {}),
       });
       return { tabId: r.tab_id, browserId: r.browser_id, observation: r.observation, dialog: r.dialog ?? null, display: r.display ?? null };
     },
