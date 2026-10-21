@@ -39,7 +39,8 @@
  *     anti-bot signal you WANT to keep)
  */
 import { spawn, spawnSync } from "node:child_process";
-import { accessSync, existsSync, readdirSync } from "node:fs";
+import { accessSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { AxError, Codes } from "./errors.js";
 
@@ -47,6 +48,41 @@ export const DEFAULT_DISPLAY_SIZE = "1920x1080x24";
 const X11_SOCKET_DIR = "/tmp/.X11-unix";
 const XVFB_BOOT_TIMEOUT_MS = 5000;
 const XVFB_ATTEMPTS = 3;
+
+/** Weighted common-consumer resolutions for fleet diversity ("random"): a
+ *  fleet of identical 1920x1080 viewports is a cross-account correlation
+ *  signal; real desktops spread across these. */
+export const COMMON_DISPLAY_SIZES = [
+  { w: 1920, h: 1080, d: 24, weight: 45 },
+  { w: 1366, h: 768, d: 24, weight: 25 },
+  { w: 1600, h: 900, d: 24, weight: 10 },
+  { w: 1680, h: 1050, d: 24, weight: 8 },
+  { w: 1440, h: 900, d: 24, weight: 7 },
+  { w: 2560, h: 1440, d: 24, weight: 5 },
+];
+
+/** Stable 31-bit hash (FNV-1a) — machine identity → one fleet geometry. */
+function stableHash(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/** Pick the fleet geometry for this machine: deterministic per machine
+ *  (hostname + uid), so one machine keeps one persona across boots while a
+ *  fleet spreads across the weighted list. */
+export function pickFleetDisplaySize(seed = `${hostname() ?? ""}:${typeof process.getuid === "function" ? process.getuid() : ""}`) {
+  const total = COMMON_DISPLAY_SIZES.reduce((a, s) => a + s.weight, 0);
+  let slot = stableHash(String(seed)) % total;
+  for (const s of COMMON_DISPLAY_SIZES) {
+    if (slot < s.weight) return { w: s.w, h: s.h, d: s.d };
+    slot -= s.weight;
+  }
+  return { w: 1920, h: 1080, d: 24 };
+}
 
 /* ------------------------------------------------------------------ config */
 
@@ -66,9 +102,25 @@ export function parseDisplaySize(s) {
   return { w, h, d };
 }
 
-/** The effective virtual-display geometry (AXUSE_DISPLAY_SIZE, validated). */
+/** The effective virtual-display geometry (AXUSE_DISPLAY_SIZE, validated).
+ *  "random" = the fleet lane: one stable geometry per machine, spread
+ *  across the weighted common-consumer list (identical fleet viewports are
+ *  a cross-account correlation signal). */
 export function displayGeometry(env = process.env) {
+  const raw = String(env.AXUSE_DISPLAY_SIZE ?? "").trim();
+  if (/^random$/i.test(raw)) return pickFleetDisplaySize();
   return parseDisplaySize(env.AXUSE_DISPLAY_SIZE) ?? parseDisplaySize(DEFAULT_DISPLAY_SIZE);
+}
+
+/** Validate an IANA timezone the way the browser will resolve it (Intl —
+ *  the same engine Chrome uses for Date/Intl). null when invalid. */
+export function validTimezone(tz) {
+  try {
+    const resolved = new Intl.DateTimeFormat("en-US", { timeZone: String(tz) }).resolvedOptions().timeZone;
+    return resolved ? tz : null;
+  } catch {
+    return null;
+  }
 }
 
 /* ------------------------------------------------------- display discovery */
@@ -193,6 +245,49 @@ export function __resetVirtualDisplay() {
   active = null;
 }
 
+/* --------------------------------------------------------- zombie hygiene */
+
+/** Read one /proc/<pid> entry: { pid, ppid, argv } or null. Injectable for tests. */
+function procEntry(pid, { readFile = (p) => readFileSync(p, "utf8") } = {}) {
+  const stat = (() => { try { return readFile(`/proc/${pid}/stat`); } catch { return null; } })();
+  const cmd = (() => { try { return readFile(`/proc/${pid}/cmdline`); } catch { return null; } })();
+  if (!stat || !cmd) return null;
+  // ppid is stat field 4 — after comm, which may contain spaces/parens.
+  const after = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+  return { pid, ppid: Number(after[1]), argv: cmd.split("\0").filter(Boolean) };
+}
+
+/** Does one /proc entry look like an axuse-spawned Xvfb (our exact launch
+ *  signature) whose parent is gone (reparented to init — a leaked zombie
+ *  from a SIGKILLed harness)? Conservative by construction: the full arg
+ *  set must match and the parent must be dead. */
+export function isStaleAxuseXvfb(entry) {
+  if (!entry || typeof entry.pid !== "number") return false;
+  const a = entry.argv ?? [];
+  if (!/Xvfb$/.test(a[0] ?? "")) return false;
+  if (!/^:\d+$/.test(a[1] ?? "")) return false;
+  for (const need of ["-screen", "0", "-ac", "-nolisten", "tcp", "-noreset"]) {
+    if (!a.includes(need)) return false;
+  }
+  return entry.ppid === 1;
+}
+
+/** Sweep leaked axuse Xvfb zombies (SIGKILLed harness processes leave an
+ *  orphaned X server behind: ~10 MB each and a display number gone, which
+ *  matters at fleet scale). Only OUR exact-signature orphans die; a display
+ *  still owned by a live process has a live parent, not ppid 1. */
+export function sweepStaleXvfb({ listDir = readdirSync, readFile, kill = (pid) => process.kill(pid, "SIGTERM") } = {}) {
+  const swept = [];
+  let pids;
+  try { pids = listDir("/proc").filter((n) => /^\d+$/.test(n)); } catch { return swept; }
+  for (const pid of pids) {
+    const entry = procEntry(Number(pid), { readFile });
+    if (!isStaleAxuseXvfb(entry)) continue;
+    try { kill(entry.pid); swept.push({ pid: entry.pid, display: entry.argv[1] }); } catch {}
+  }
+  return swept;
+}
+
 function sleep(ms) { return new Promise((ok) => setTimeout(ok, ms)); }
 
 /** Wait for Xvfb's X socket (its readiness signal) or its early death. */
@@ -226,6 +321,11 @@ export async function ensureVirtualDisplay({ force = false } = {}) {
       throw new AxError(Codes.LAUNCH_FAILED, `Cannot boot server mode: Xvfb was not found. ${plan.hint ?? ""}`, { retry: "never" });
     }
     const geo = displayGeometry();
+    // Zombie hygiene first: a SIGKILLed harness leaves an orphaned Xvfb
+    // (~10 MB, one display number gone each time — fleet scale poison).
+    // Freed displays then rejoin the pickable pool.
+    const swept = sweepStaleXvfb();
+    if (swept.length) await sleep(400);
     const taken = takenDisplayNumbers();
     for (let attempt = 1; attempt <= XVFB_ATTEMPTS; attempt++) {
       const n = pickDisplayNumber({ taken });
@@ -253,6 +353,7 @@ export async function ensureVirtualDisplay({ force = false } = {}) {
       active = {
         display, width: geo.w, height: geo.h, depth: geo.d,
         pid: proc.pid, virtual: true, startedAt: Date.now(), proc,
+        ...(swept.length ? { swept } : {}),
       };
       // Cleanup: normal exits kill our Xvfb. Signal deaths are covered by
       // process-group kills (the norm for harness/CLI teardown) and by

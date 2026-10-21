@@ -17,6 +17,42 @@ import { ensureVirtualDisplay, needsNoSandbox, serverModePlan, virtualDisplaySta
 
 const SEND_TIMEOUT_MS = 30_000;
 
+/** The pre-document posture script: restores values a human-driven Chrome
+ *  reports but a CDP-driven one does not. `--disable-blink-features=
+ *  AutomationControlled` already fixes navigator.webdriver at the SOURCE
+ *  (all contexts — main frames, cross-origin iframes); this script is the
+ *  belt-and-suspenders fallback for builds where the flag is not honored.
+ *  Optional persona overrides (AXUSE_FP_CORES / AXUSE_FP_MEMORY): a
+ *  96-core server's honest hardwareConcurrency is a persona mismatch for a
+ *  residential-looking session — the operator may cap it. Opt-in, honest
+ *  hardware stays the default. Exported for tests. */
+export function postureScript(env = process.env) {
+  const parts = [
+    "try { delete navigator.webdriver; } catch {}",
+    "Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true });",
+  ];
+  const cores = Number(env.AXUSE_FP_CORES);
+  if (Number.isFinite(cores) && cores > 0 && Number.isInteger(cores)) {
+    parts.push(
+      `try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ${cores}, configurable: true }); } catch {}`,
+      `try { Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => ${cores}, configurable: true }); } catch {}`,
+    );
+  }
+  const mem = Number(env.AXUSE_FP_MEMORY);
+  if (Number.isFinite(mem) && mem > 0) {
+    // deviceMemory is Chrome-reported in the 0.25/0.5/1/2/4/8 buckets — and
+    // only on platforms that expose the API at all (undefined on this very
+    // Linux build). Overriding only where it EXISTS keeps the platform
+    // honest: creating it on a platform that lacks it would be a stronger
+    // deviation than the value it replaces.
+    const bucket = [0.25, 0.5, 1, 2, 4, 8].reduce((a, b) => (mem >= b ? b : a), 0.25);
+    parts.push(
+      `if ('deviceMemory' in navigator) { try { Object.defineProperty(navigator, 'deviceMemory', { get: () => ${bucket}, configurable: true }); } catch {} }`,
+    );
+  }
+  return parts.join("\n");
+}
+
 /** Chromium keeps its discardable/shared-memory segment in /dev/shm (tmpfs).
  *  When that mount is full or missing, the browser aborts during startup —
  *  on Linux with a bare "Browser exited during startup (code null)" and one
@@ -343,6 +379,19 @@ export class BrowserHandle {
       "--remote-allow-origins=*", // modern Chrome rejects unknown ws Origins
     ];
     if (headless) args.push("--headless");
+    // Source-level posture fix (verified live, Chrome 151): with remote
+    // debugging active, Chrome otherwise reports navigator.webdriver ===
+    // true in EVERY context (main frames, cross-origin iframes) — a
+    // fingerprint our own plumbing creates, present on no human-driven
+    // Chrome. This flag turns it off at the source; the per-document script
+    // in attachTab is the fallback for builds that ignore the flag.
+    args.push("--disable-blink-features=AutomationControlled");
+    // Persona coherence: --accept-lang drives navigator.language AND
+    // navigator.languages AND the Accept-Language header (verified live:
+    // --lang alone does NOT — Chrome persists the OS-derived preference).
+    if (process.env.AXUSE_LANG && /^[\w,-]{2,32}$/.test(process.env.AXUSE_LANG)) {
+      args.push(`--accept-lang=${process.env.AXUSE_LANG}`);
+    }
     const vd = virtualDisplayStatus();
     if (vd.active) {
       // No monitor is attached to a virtual display: give Chrome a real
@@ -362,7 +411,13 @@ export class BrowserHandle {
       args.push("--disable-dev-shm-usage");
     }
     args.push(...extraArgs);
-    const proc = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: false });
+    // Persona coherence (opt-in): TZ drives Date/Intl in the page AND in
+    // workers — set it on the child environment so it matches the egress
+    // persona (a UTC server behind a US residential exit is a classic
+    // timezone-mismatch score).
+    const childEnv = { ...process.env };
+    if (process.env.AXUSE_TIMEZONE) childEnv.TZ = process.env.AXUSE_TIMEZONE;
+    const proc = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: false, env: childEnv });
     let wsUrl;
     try {
       wsUrl = await new Promise((resolve, reject) => {
@@ -466,19 +521,15 @@ export class BrowserHandle {
     await this.conn.send("Page.enable", {}, sessionId);
     await this.conn.send("Runtime.enable", {}, sessionId);
     await this.conn.send("Log.enable", {}, sessionId);
-    // Fingerprint neutralizer (NOT challenge tampering): modern Chrome sets
-    // navigator.webdriver=true merely because a DevTools client exists —
-    // a fingerprint OUR OWN plumbing creates, present on no human-driven
-    // Chrome. This runs before any page script on every new document and
-    // restores the exact value a human-driven browser reports (false).
-    // It does not fake, answer or shortcut any challenge — solvers still
-    // click real widgets with trusted input. Opt out: AXUSE_NEUTRALIZE_WEBDRIVER=0.
+    // Posture script (NOT challenge tampering): the AutomationControlled
+    // launch flag already restores navigator.webdriver at the source; this
+    // pre-document script is the fallback for builds that ignore the flag,
+    // plus the optional persona overrides (AXUSE_FP_CORES / AXUSE_FP_MEMORY).
+    // It never fakes, answers or shortcuts a challenge — solvers still click
+    // real widgets with trusted input. Opt out: AXUSE_NEUTRALIZE_WEBDRIVER=0.
     if (!/^(0|false|off|no)$/i.test(process.env.AXUSE_NEUTRALIZE_WEBDRIVER ?? "")) {
       try {
-        await this.conn.send("Page.addScriptToEvaluateOnNewDocument", {
-          source: "try { delete navigator.webdriver; } catch {} "
-            + "Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true });",
-        }, sessionId);
+        await this.conn.send("Page.addScriptToEvaluateOnNewDocument", { source: postureScript() }, sessionId);
       } catch { /* older builds: skip, never fail the attach */ }
     }
     // File inputs: intercept the native chooser (it would block forever) and

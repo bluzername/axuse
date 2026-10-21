@@ -91,11 +91,14 @@ For one-shot / cron-style runs no service is needed — `axuse solve`,
 | variable | effect |
 |---|---|
 | `AXUSE_SERVER_MODE` | `auto` (default) — boot a private Xvfb when Linux + no live display. `0`/`off` disables it (headed launches then fail typed with guidance). |
-| `AXUSE_DISPLAY_SIZE` | Virtual display geometry, default `1920x1080x24`. |
+| `AXUSE_DISPLAY_SIZE` | Virtual display geometry, default `1920x1080x24`. `random` = fleet lane: one **stable geometry per machine** (hostname+uid hash), spread across the weighted common-consumer list — identical fleet viewports are a cross-account correlation signal. |
+| `AXUSE_TIMEZONE` | IANA zone for the Chrome process (`TZ`): drives `Date`/`Intl` in pages AND workers. Set it to the **egress persona's** zone — a UTC server behind a US residential exit is a classic timezone-mismatch score. Validated by `doctor`. |
+| `AXUSE_LANG` | `--accept-lang` for Chrome (verified live: `--lang` alone does **not** move `navigator.language`): sets `navigator.language`/`languages` **and** the `Accept-Language` header. |
+| `AXUSE_FP_CORES` / `AXUSE_FP_MEMORY` | Opt-in persona caps: a 96-core server's honest `hardwareConcurrency` is a persona mismatch for residential-looking traffic. `AXUSE_FP_CORES=8` overrides `navigator.hardwareConcurrency`; `AXUSE_FP_MEMORY` overrides `navigator.deviceMemory` — only where the platform exposes the API (never invents it). Honest hardware stays the default. |
 | `AXUSE_NO_SANDBOX` | `1` forces `--no-sandbox`. Auto-applied anyway when running as root (containers) — Chrome refuses root otherwise. |
 | `AXUSE_BROWSER` | Path to the browser binary (as on any host). |
 | `AXUSE_PROFILE_DIR` | Where browser profiles go (defaults to the OS temp dir). |
-| `AXUSE_NEUTRALIZE_WEBDRIVER` | `0` disables the `navigator.webdriver` neutralizer (see below). Default: on. |
+| `AXUSE_NEUTRALIZE_WEBDRIVER` | `0` disables the `navigator.webdriver` posture fix (see below). Default: on. |
 | `AXUSE_HEADLESS` | **Do not set on servers with challenge traffic.** Forces `--headless` for every launch — the exact signal anti-bot systems look for. It stays available for trusted internal pages. |
 
 Every knob is checked by `node src/cli.js doctor` — run it first, it tells
@@ -139,6 +142,34 @@ chmod 600 ~/.config/axuse/secrets.json
 `AXUSE_SECRETS_FILE` overrides the path. A file the group/world can read is
 refused (fix: `chmod 600`). Typed failure messages name the exact options.
 
+## Persona coherence (the parts headless-vs-headed does not cover)
+
+Being headed removes the *headless* class of signals. A second class is
+**persona coherence**: the browser's persona must match the egress persona
+(the IP it leaves through). Servers fail this class by default — a UTC
+clock behind a US residential exit, `en-US` behind a German IP, 96 cores in
+a "consumer" session, a fleet where every account shows the exact same
+1920x1080 canvas hash:
+
+```bash
+AXUSE_TIMEZONE=America/New_York      # Date/Intl in pages AND workers (TZ)
+AXUSE_LANG=en-GB                     # navigator.language(s) + Accept-Language
+AXUSE_DISPLAY_SIZE=random            # stable geometry per machine, fleet spread
+AXUSE_FP_CORES=8                     # optional persona cap for big servers
+AXUSE_FP_MEMORY=8                    # optional; only where the API exists
+```
+
+`--disable-blink-features=AutomationControlled` is passed on every launch
+(verified live on Chrome 151): with remote debugging active, Chrome reports
+`navigator.webdriver === true` in **every context** — main frames and
+cross-origin iframes — a fingerprint the *harness itself* creates, present
+on no human-driven Chrome. The flag turns it off **at the source**; a
+pre-document script is the fallback for builds that ignore the flag
+(`AXUSE_NEUTRALIZE_WEBDRIVER=0` opts out of the fallback).
+
+Everything is measured and printed by `doctor` (posture + persona lines in
+the smoke test), and asserted by `test/server-mode.test.js`.
+
 ## Scaling out (massive operations)
 
 - **One private Xvfb per axuse process** (display numbers are picked away
@@ -156,17 +187,31 @@ refused (fix: `chmod 600`). Typed failure messages name the exact options.
   `doctor` reports both.
 - **Cleanup**: the Xvfb is a child of the axuse process — normal exits and
   process-group kills reap it; under systemd use `KillMode=control-group`.
+  A `kill -9`ed harness can still leak an orphaned Xvfb; server mode sweeps
+  those at the next boot (only processes matching axuse's exact Xvfb launch
+  signature whose parent is gone — verified by pattern tests, never a
+  foreign X server). `doctor` reports them without killing.
 
 ## What is deliberately NOT done
 
 - **No headless for challenge pages.** Ever. That is the whole point.
 - **No DOM tampering with challenge logic.** The only page-level patch is
-  the `navigator.webdriver` neutralizer: modern Chrome sets it to `true`
+  the `navigator.webdriver` posture fix, applied at the source via a launch
+  flag (a pre-document script as fallback): modern Chrome sets it to `true`
   merely because a DevTools client is attached — a fingerprint of *our own
   plumbing*, present on no human-driven Chrome. axuse restores the exact
-  value a human browser reports (`false`), before any page script runs.
-  It does not fake, answer or shortcut any challenge — solvers still click
-  real widgets with trusted input. Opt out: `AXUSE_NEUTRALIZE_WEBDRIVER=0`.
+  value a human browser reports (`false`), in every frame. It does not
+  fake, answer or shortcut any challenge — solvers still click real
+  widgets with trusted input. Opt out: `AXUSE_NEUTRALIZE_WEBDRIVER=0`.
+- **No invented hardware.** The WebGL renderer string stays the honest
+  one (SwiftShader/ANGLE software — what every GPU-less Linux desktop
+  reports too); `hardwareConcurrency`/`deviceMemory` stay honest unless the
+  operator opts into the persona caps. The deviceMemory override only
+  applies on platforms that expose the API — never inventing an API surface
+  the platform's real Chrome lacks.
+- **No egress-traffic tricks.** JA4/TLS and HTTP/2 fingerprinting live
+  below the page layer — the customer's proxy vendor's product (documented
+  integration point: bring your own egress).
 - **No fabricated results.** Solvers report `solved: false` honestly when
   a page hard-blocks; `doctor` and tests state measured numbers.
 
@@ -176,10 +221,14 @@ refused (fix: `chmod 600`). Typed failure messages name the exact options.
 node src/cli.js doctor
 # server mode: ready — no live X display; headed Chrome will auto-boot a
 #   private Xvfb (1920x1080x24, NOT headless — anti-bot-safe; …)
+# persona: timezone not overridden (Chrome uses this host's TZ, currently …)
+#   — set AXUSE_TIMEZONE to the egress persona's zone when routing through a proxy
+# stale Xvfb zombies: N leaked … (only printed when found; swept at next boot)
 # fonts: … (only printed when fonts are missing)
 # smoke test: server mode — booting a virtual display, launching HEADED Chrome…
-# server-mode facts: display :762 (virtual) · UA headed (no Headless substring)
-#   · navigator.webdriver false · viewport 1919x992 · WebGL present (SwiftShader)
+# server-mode facts: display :895 (virtual) · UA headed (no Headless substring)
+#   · navigator.webdriver false · viewport 1919x992 · WebGL present (ANGLE (Google, Vulkan … SwiftShader))
+# server-mode persona: tz Europe/Vienna · language en-US · cores 16 · deviceMemory undefined
 # server-mode anti-bot posture: OK — indistinguishable headed build
 
 node --test test/server-mode.test.js     # the same assertions, in CI and locally

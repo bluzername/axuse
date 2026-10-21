@@ -332,7 +332,7 @@ async function doctor() {
     } else {
       serverModeReady = true;
       const geo = vd.displayGeometry();
-      out(`server mode: ready — no live X display; headed Chrome will auto-boot a private Xvfb (${geo.w}x${geo.h}x${geo.d}, NOT headless — anti-bot-safe; AXUSE_DISPLAY_SIZE to change, AXUSE_SERVER_MODE=0 to disable)`);
+      out(`server mode: ready — no live X display; headed Chrome will auto-boot a private Xvfb (${geo.w}x${geo.h}x${geo.d}, NOT headless — anti-bot-safe; AXUSE_DISPLAY_SIZE to change — 'random' picks a stable geometry per machine so a fleet is not all 1920x1080; AXUSE_SERVER_MODE=0 to disable)`);
     }
     serverModeActive = vd.virtualDisplayStatus().active;
     const fonts = vd.fontHint(vd.fontProbe());
@@ -342,6 +342,24 @@ async function doctor() {
     }
     if (/^(1|true)$/i.test(process.env.AXUSE_HEADLESS ?? "")) {
       out("AXUSE_HEADLESS=1 is set: EVERY launch runs --headless and challenge/anti-bot pages WILL detect it — unset it on servers (server mode keeps Chrome headed for free)");
+    }
+    // Persona coherence: the browser persona must match the egress persona
+    // (timezone/locale mismatches vs the exit IP are classic scores).
+    if (process.env.AXUSE_TIMEZONE) {
+      const ok = vd.validTimezone(process.env.AXUSE_TIMEZONE);
+      out(`AXUSE_TIMEZONE=${process.env.AXUSE_TIMEZONE}: ${ok ? "valid — Chrome runs with this TZ (Date/Intl match the egress persona)" : `INVALID (not an IANA zone Chrome accepts) — fix it or unset it; Intl rejects it`}`);
+    } else {
+      out(`persona: timezone not overridden (Chrome uses this host's TZ, currently ${new Intl.DateTimeFormat().resolvedOptions().timeZone}) — set AXUSE_TIMEZONE to the egress persona's zone when routing through a proxy`);
+    }
+    if (process.env.AXUSE_LANG) {
+      out(`AXUSE_LANG=${process.env.AXUSE_LANG}: drives --lang (navigator.language(s) + Accept-Language)`);
+    }
+    if (process.env.AXUSE_FP_CORES || process.env.AXUSE_FP_MEMORY) {
+      out(`persona overrides active: hardwareConcurrency=${process.env.AXUSE_FP_CORES ?? "(honest)"} · deviceMemory=${process.env.AXUSE_FP_MEMORY ?? "(honest)"} — a big server's honest cores are a persona mismatch for residential-looking traffic`);
+    }
+    const zombies = vd.sweepStaleXvfb({ kill: () => {} });
+    if (zombies.length) {
+      out(`stale Xvfb zombies: ${zombies.length} leaked axuse Xvfb process(es) (${zombies.map((z) => z.display).join(", ")}) — SIGKILLed harness processes; they are swept automatically at the next server-mode boot`);
     }
   }
   if (process.platform === "win32" || process.platform === "darwin") {
@@ -443,9 +461,19 @@ async function doctor() {
       const obs = r.observation;
       if (useServerMode) {
         const ua = JSON.parse((await c.execute("evaluate", { expression: "navigator.userAgent" })).value ?? '""');
-        const fp = JSON.parse((await c.execute("evaluate", { expression: "({webdriver: navigator.webdriver, w: innerWidth, h: innerHeight, webgl: !!document.createElement('canvas').getContext('webgl')})" })).value ?? "{}");
+        const fp = JSON.parse((await c.execute("evaluate", {
+          expression: `(() => {
+            const g = document.createElement('canvas').getContext('webgl');
+            const dbg = g && g.getExtension('WEBGL_debug_renderer_info');
+            return { webdriver: navigator.webdriver, w: innerWidth, h: innerHeight, webgl: !!g,
+              renderer: dbg ? g.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : null,
+              tz: Intl.DateTimeFormat().resolvedOptions().timeZone, lang: navigator.language,
+              cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory };
+          })()`,
+        })).value ?? "{}");
         const antiBotOk = !/headless/i.test(String(ua)) && fp.webdriver === false && fp.w >= 1200;
-        out(`server-mode facts: display ${r.display?.id} (virtual) · UA ${/headless/i.test(String(ua)) ? "CONTAINS Headless (BAD)" : "headed (no Headless substring)"} · navigator.webdriver ${fp.webdriver} · viewport ${fp.w}x${fp.h} · WebGL ${fp.webgl ? "present (SwiftShader)" : "absent"}`);
+        out(`server-mode facts: display ${r.display?.id} (virtual) · UA ${/headless/i.test(String(ua)) ? "CONTAINS Headless (BAD)" : "headed (no Headless substring)"} · navigator.webdriver ${fp.webdriver} · viewport ${fp.w}x${fp.h} · WebGL ${fp.webgl ? `present (${String(fp.renderer).slice(0, 40)})` : "absent"}`);
+        out(`server-mode persona: tz ${fp.tz} · language ${fp.lang} · cores ${fp.cores} · deviceMemory ${fp.mem}${process.env.AXUSE_TIMEZONE ? " (AXUSE_TIMEZONE set)" : ""}`);
         out(`server-mode anti-bot posture: ${antiBotOk && fp.webgl ? "OK — indistinguishable headed build" : "CHECK the facts above"}`);
       }
       const click = await c.execute("click", { target: { ref: "e1" }, settle_ms: 100 });

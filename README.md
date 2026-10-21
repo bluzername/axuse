@@ -84,9 +84,11 @@ element refs like `[ref=e7]`. Each action returns only what changed.
 | variable | effect |
 |---|---|
 | `AXUSE_SERVER_MODE` | `auto` (default): on a display-less Linux server, boot a private Xvfb and keep Chrome fully **headed** on it (anti-bot-safe; see [Servers, no desktop](docs/server-mode.md)) |
-| `AXUSE_DISPLAY_SIZE` | virtual display geometry for server mode (default `1920x1080x24`) |
+| `AXUSE_DISPLAY_SIZE` | virtual display geometry for server mode (default `1920x1080x24`; `random` = a stable geometry per machine, so a fleet is not all 1920x1080) |
+| `AXUSE_TIMEZONE` | IANA `TZ` for the Chrome process — `Date`/`Intl` in pages and workers match the egress persona (validated by `doctor`) |
+| `AXUSE_LANG` | `--accept-lang` for Chrome — `navigator.language(s)` and the `Accept-Language` header match the egress persona |
 | `AXUSE_NO_SANDBOX=1` | force `--no-sandbox` (auto for root/container server runs) |
-| `AXUSE_NEUTRALIZE_WEBDRIVER=0` | disable the `navigator.webdriver` neutralizer (restores the human-browser value `false`) |
+| `AXUSE_NEUTRALIZE_WEBDRIVER=0` | disable the `navigator.webdriver` posture-fix fallback (the `AutomationControlled` launch flag already fixes it at the source) |
 | `AXUSE_HEADLESS=1` | launch the browser without a window — **trusted internal pages only**: challenge/anti-bot pages detect headless first; servers get server mode instead |
 | `AXUSE_BROWSER` | path to the browser binary |
 | `AXUSE_PROFILE_DIR` | where temporary browser profiles go (default: OS temp; they are deleted on exit) |
@@ -105,11 +107,16 @@ first, so server mode never uses `--headless`: it boots a private Xvfb and
 runs Chrome **fully headed** on it — real headed build, no headless
 fingerprint (verified live against Turnstile: `ax_solve_captcha` solves on a
 server with no desktop, and the slider engine's human-curve drags land
-10/10). Solver plugins that need vision call a multimodal model through any
-OpenAI-compatible API; keys come from env vars or an owner-only secrets
-file. One-time setup, systemd wiring, env reference and scale notes:
-[`docs/server-mode.md`](docs/server-mode.md) — and `node src/cli.js doctor`
-verifies the whole lane (it prints the measured anti-bot posture).
+10/10). Beyond headed-vs-headless, server mode covers **persona
+coherence** (`AXUSE_TIMEZONE`/`AXUSE_LANG` matching the egress persona,
+`AXUSE_DISPLAY_SIZE=random` fleet diversity, `--disable-blink-features=
+AutomationControlled` so `navigator.webdriver` stays `false` at the source)
+and fleet hygiene (zombie-Xvfb sweep). Solver plugins that need vision call
+a multimodal model through any OpenAI-compatible API; keys come from env
+vars or an owner-only secrets file. One-time setup, systemd wiring, env
+reference and scale notes: [`docs/server-mode.md`](docs/server-mode.md) —
+and `node src/cli.js doctor` verifies the whole lane (it prints the measured
+anti-bot posture and persona).
 
 ## Benchmark
 

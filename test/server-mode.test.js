@@ -21,8 +21,10 @@ import {
   parseDisplaySize, displayNumber, displayUsable, displayGeometry,
   serverModeEnabled, serverModePlan, pickDisplayNumber, takenDisplayNumbers,
   needsNoSandbox, virtualDisplayStatus, __resetVirtualDisplay,
+  COMMON_DISPLAY_SIZES, pickFleetDisplaySize, validTimezone,
+  isStaleAxuseXvfb, sweepStaleXvfb,
 } from "../src/core/vdisplay.js";
-import { locateBrowser } from "../src/core/cdp.js";
+import { locateBrowser, postureScript } from "../src/core/cdp.js";
 import { Controller } from "../src/core/controller.js";
 
 /* ------------------------------------------------------------ unit lane */
@@ -104,6 +106,81 @@ test("server mode: AXUSE_SERVER_MODE / no-sandbox env parsing", () => {
   assert.equal(needsNoSandbox({ uid: 1000, env: {} }).add, false);
 });
 
+test("server mode: fleet display diversity — 'random' is stable per machine and stays in the common list", () => {
+  // Deterministic per machine (seed) — one persona per machine across boots.
+  const a = pickFleetDisplaySize("host-a:1000");
+  const b = pickFleetDisplaySize("host-a:1000");
+  assert.deepEqual(a, b, "same machine → same geometry");
+  assert.ok(COMMON_DISPLAY_SIZES.some((s) => s.w === a.w && s.h === a.h), "picked from the weighted common list");
+  // A fleet spreads: 24 machines cover ≥3 distinct geometries.
+  const distinct = new Set(Array.from({ length: 24 }, (_, i) => {
+    const g = pickFleetDisplaySize(`host-${i}:1000`);
+    return `${g.w}x${g.h}`;
+  }));
+  assert.ok(distinct.size >= 3, `24 machines spread across only ${distinct.size} geometries`);
+  // displayGeometry honors 'random' (case-insensitive) and rejects garbage.
+  assert.ok(COMMON_DISPLAY_SIZES.some((s) => {
+    const g = displayGeometry({ AXUSE_DISPLAY_SIZE: "RANDOM" });
+    return s.w === g.w && s.h === g.h;
+  }));
+  assert.deepEqual(displayGeometry({ AXUSE_DISPLAY_SIZE: "nonsense" }), { w: 1920, h: 1080, d: 24 });
+});
+
+test("server mode: IANA timezone validation (the same engine Chrome uses)", () => {
+  assert.equal(validTimezone("Europe/Amsterdam"), "Europe/Amsterdam");
+  assert.equal(validTimezone("America/New_York"), "America/New_York");
+  assert.equal(validTimezone("Not/AZone"), null);
+  assert.equal(validTimezone(""), null);
+  assert.equal(validTimezone(null), null);
+});
+
+test("server mode: posture script — webdriver fallback plus opt-in persona overrides", () => {
+  const base = postureScript({});
+  assert.match(base, /navigator\.webdriver/);
+  assert.doesNotMatch(base, /hardwareConcurrency/, "honest cores stay the default");
+  assert.doesNotMatch(base, /deviceMemory/, "honest memory stays the default");
+  const cores = postureScript({ AXUSE_FP_CORES: "8" });
+  assert.match(cores, /hardwareConcurrency[^]+=> 8/);
+  assert.doesNotMatch(cores, /deviceMemory/);
+  // deviceMemory lands in Chrome's 0.25/0.5/1/2/4/8 buckets (16 GB input → 8).
+  const mem = postureScript({ AXUSE_FP_MEMORY: "3" });
+  assert.match(mem, /'deviceMemory' in navigator[^]+=> 2/);
+  // Garbage values are ignored, never a broken page.
+  const junk = postureScript({ AXUSE_FP_CORES: "zero", AXUSE_FP_MEMORY: "-1" });
+  assert.doesNotMatch(junk, /hardwareConcurrency/);
+  assert.doesNotMatch(junk, /deviceMemory/);
+});
+
+test("server mode: Xvfb zombie sweep — only our exact-signature orphans die", () => {
+  const mk = (pid, ppid, argv, first = "Xvfb") => ({ pid, ppid, argv: [first, ...argv] });
+  const ours = mk(101, 1, [":311", "-screen", "0", "1920x1080x24", "-ac", "-nolisten", "tcp", "-noreset"]);
+  const liveParent = mk(102, 900, [":312", "-screen", "0", "1920x1080x24", "-ac", "-nolisten", "tcp", "-noreset"]);
+  const noReset = mk(103, 1, [":313", "-screen", "0", "1920x1080x24", "-ac", "-nolisten", "tcp"]); // not ours (no -noreset)
+  const otherName = mk(104, 1, [":314", "-screen", "0", "1920x1080x24", "-ac", "-nolisten", "tcp", "-noreset"], "Xvfb-run-wrapper");
+  assert.equal(isStaleAxuseXvfb(ours), true);
+  assert.equal(isStaleAxuseXvfb(liveParent), false, "a live parent owns it — never touched");
+  assert.equal(isStaleAxuseXvfb(noReset), false, "no -noreset: not our signature");
+  assert.equal(isStaleAxuseXvfb(otherName), false, "argv[0] must be exactly Xvfb");
+  // sweepStaleXvfb: fake /proc, only the orphan is killed.
+  const killed = [];
+  const stat = { 101: ours, 102: liveParent, 103: noReset, 104: otherName };
+  const swept = sweepStaleXvfb({
+    listDir: () => Object.keys(stat),
+    readFile: (p) => {
+      const m = /^\/proc\/(\d+)\/(stat|cmdline)$/.exec(p);
+      const e = stat[Number(m[1])];
+      return m[2] === "stat"
+        ? `Xvfb (x) S ${e.ppid}`
+        : e.argv.join("\0");
+    },
+    kill: (pid) => { killed.push(pid); },
+  });
+  assert.deepEqual(swept, [{ pid: 101, display: ":311" }]);
+  assert.deepEqual(killed, [101]);
+  // No /proc (non-Linux-shaped hosts): sweep is a silent no-op.
+  assert.deepEqual(sweepStaleXvfb({ listDir: () => { throw new Error("ENOENT"); }, kill: () => assert.fail("must not kill") }), []);
+});
+
 /* ------------------------------------------------------------ live lane */
 
 const linux = process.platform === "linux";
@@ -182,6 +259,48 @@ test("server mode: headed Chrome auto-boots a virtual display (anti-bot posture)
   // And the trusted-input path works on it (the solver lane's primitives).
   const clicked = await c.execute("click", { target: { x: 8, y: 8 }, settle_ms: 50 });
   assert.ok(clicked, "input dispatch on the virtual display is fine");
+});
+
+test("server mode: persona coherence — TZ, language and core/memory overrides reach the page", { skip: liveSkip }, async (t) => {
+  const restore = withDeadDisplay();
+  t.after(restore);
+  const saved = ["AXUSE_TIMEZONE", "AXUSE_LANG", "AXUSE_FP_CORES", "AXUSE_FP_MEMORY"].map((k) => [k, process.env[k]]);
+  process.env.AXUSE_TIMEZONE = "Europe/Amsterdam";
+  process.env.AXUSE_LANG = "en-GB";
+  process.env.AXUSE_FP_CORES = "8";
+  process.env.AXUSE_FP_MEMORY = "4";
+  t.after(() => {
+    for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  });
+  __resetVirtualDisplay();
+  const c = new Controller();
+  t.after(() => c.dispose());
+  const r = await c.execute("open", { url: "data:text/html,<h1>persona</h1>", settle_ms: 150 });
+  assert.equal(r.display?.virtual, true, "server mode still boots (persona overrides change no lane)");
+  const p = JSON.parse((await c.execute("evaluate", {
+    expression: `(() => {
+      const g = document.createElement('canvas').getContext('webgl');
+      const dbg = g && g.getExtension('WEBGL_debug_renderer_info');
+      return { tz: Intl.DateTimeFormat().resolvedOptions().timeZone, lang: navigator.language,
+        langs: navigator.languages && navigator.languages[0], cores: navigator.hardwareConcurrency,
+        mem: navigator.deviceMemory, webdriver: navigator.webdriver,
+        renderer: dbg ? g.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : null, webgl: !!g };
+    })()`,
+  })).value ?? "{}");
+  // TZ reaches Date/Intl in the page (matches the egress persona).
+  assert.equal(p.tz, "Europe/Amsterdam");
+  // --lang drives navigator.language AND the Accept-Language header source.
+  assert.equal(p.lang, "en-GB");
+  // Persona overrides land (opt-in caps for high-core servers). deviceMemory
+  // only exists on platforms that expose the API (this Linux build does not)
+  // — the override applies exactly there, never inventing an API surface
+  // the platform's honest Chrome lacks.
+  assert.equal(p.cores, 8);
+  assert.ok(p.mem === 4 || p.mem === undefined, `deviceMemory: ${p.mem}`);
+  // And the posture facts still hold under the persona.
+  assert.equal(p.webdriver, false);
+  assert.equal(p.webgl, true);
+  assert.ok(typeof p.renderer === "string" && p.renderer.length > 0, `renderer reported honestly: ${p.renderer}`);
 });
 
 test("server mode: AXUSE_HEADLESS=1 lane still opens headless on a dead display", { skip: liveSkip }, async (t) => {
