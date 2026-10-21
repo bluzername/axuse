@@ -33,19 +33,26 @@ display: :762 (virtual 1920x1080 — headed on Xvfb, server mode)
 
 ## One-time server setup
 
-```bash
-# Node >= 22, a Chromium-family browser, Xvfb and real fonts.
-sudo apt-get update
-sudo apt-get install -y nodejs xvfb fonts-liberation fonts-dejavu-core fontconfig
-# Chrome (either the distro package or Chrome for Testing):
-wget -qO- https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json \
-  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).channels.Stable.downloads.chrome.find(x=>x.platform==="linux64").url))' \
-  | xargs curl -sL -o /tmp/cft.zip && unzip -q /tmp/cft.zip -d /opt/axuse-cft
-sudo ln -sf /opt/axuse-cft/chrome-linux64/chrome /usr/local/bin/axuse-chrome
-# Or the classic .deb: sudo apt-get install -y google-chrome-stable
-#   (from Google's repo; any Chromium-family build works — AXUSE_BROWSER points at it)
+Two lanes. **No-sudo lane** (containers, restricted hosts — axuse provisions
+a pinned Chrome-for-Testing under `~/.cache/axuse/browsers`, zero system
+changes, full posture verified on that build):
 
-node src/cli.js doctor   # must say: "server mode: ready"
+```bash
+sudo apt-get install -y nodejs xvfb fonts-liberation fonts-dejavu-core fontconfig
+node src/cli.js install-browser            # or: --version 156.0.8078.47 to pin a fleet
+node src/cli.js doctor                     # must say: "server mode: ready"
+```
+
+Fleets: mount a cached volume at `AXUSE_MANAGED_BROWSER_DIR` and every box
+runs the exact same pinned build (one download, run everywhere; axuse picks
+the managed build up ahead of distro packages automatically).
+
+**Distro lane** (Google's apt repo or CfT by hand — any Chromium-family
+build works; `AXUSE_BROWSER` points at it):
+
+```bash
+sudo apt-get install -y google-chrome-stable   # from Google's repo
+node src/cli.js doctor
 ```
 
 Fonts are not cosmetic: without fontconfig + font packages, text renders as
@@ -97,6 +104,8 @@ For one-shot / cron-style runs no service is needed — `axuse solve`,
 | `AXUSE_FP_CORES` / `AXUSE_FP_MEMORY` | Opt-in persona caps: a 96-core server's honest `hardwareConcurrency` is a persona mismatch for residential-looking traffic. `AXUSE_FP_CORES=8` overrides `navigator.hardwareConcurrency`; `AXUSE_FP_MEMORY` overrides `navigator.deviceMemory` — only where the platform exposes the API (never invents it). Honest hardware stays the default. |
 | `AXUSE_PROXY` | Per-process default for the per-launch `proxy` param: `"http://host:port"`, `"socks5://user:pass@host:port"` — one browser instance per spec, credentials answered over CDP. |
 | `AXUSE_PROXY_BYPASS` | Chrome proxy bypass list override (default: loopback bypassed so local fixtures work; `"<-loopback>"` includes localhost). |
+| `AXUSE_AMBIENT_MOTION` | `0` disables idle pointer park-fuzz; default `auto` = on exactly in server mode. |
+| `AXUSE_MANAGED_BROWSER_DIR` | Where `axuse install-browser` puts the pinned Chrome-for-Testing build (default `~/.cache/axuse/browsers`) — mount a cached volume here for fleets. |
 | `AXUSE_NO_SANDBOX` | `1` forces `--no-sandbox`. Auto-applied anyway when running as root (containers) — Chrome refuses root otherwise. |
 | `AXUSE_BROWSER` | Path to the browser binary (as on any host). |
 | `AXUSE_PROFILE_DIR` | Where browser profiles go (defaults to the OS temp dir). |
@@ -117,6 +126,7 @@ that already *is* the server shape; no local model, no GUI needed:
 | `<PREFIX>_VISION_KEY` | (required) e.g. an OpenRouter key |
 | `<PREFIX>_VISION_BASE` | `https://openrouter.ai/api/v1` |
 | `<PREFIX>_VISION_MODEL` | plugin default (e.g. `google/gemini-4-argon`) |
+| `<PREFIX>_VISION_FALLBACK_MODEL` | (optional) one escalation attempt when the primary model is degraded — provider outage, rate limits, a model retired mid-run |
 
 `<PREFIX>` is the plugin's env namespace (`CAPTCHA_PRO_*`, `CHALLENGE_*`).
 The base accepts any OpenAI-compatible endpoint — OpenRouter (default,
@@ -161,6 +171,14 @@ plugins where it matters:
   dynamics are sampled. Solver context: `ctx.type({..., human: true})`.
 - **Sliders/interstitials** already move humanly (the challenge-handler's
   bezier trajectory engine with ≥8 velocity maxima and sub-8 ms jitter).
+- **Ambient park-fuzz** (server mode default, `AXUSE_AMBIENT_MOTION=0`
+  opts out): agent loops freeze for seconds between tool calls while they
+  think — a pointer that NEVER moves between bursts is a correlation
+  signal. Between (and during waiting) commands, axuse dispatches trusted
+  micro-jitter (±1–3 px with rare 8–20 px excursions, 1.4–4.2 s cadence)
+  anchored to the last action position. It pauses for every
+  pointer-holding command and whenever a dialog is open — precision always
+  wins over entropy.
 
 ## Egress: one browser, one proxy (per-instance routing)
 

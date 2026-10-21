@@ -18,7 +18,7 @@ import { captureScreenshot, DEFAULT_BUDGET_BYTES } from "./screenshot.js";
 import { virtualDisplayStatus } from "./vdisplay.js";
 import {
   click as doClick, hover as doHover, drag as doDrag, wheel as doWheel,
-  insertText, humanType, pressCombo, platformShortcut, selectAllCombo,
+  insertText, humanType, pressCombo, platformShortcut, planPointerJitter, selectAllCombo,
   refResolveExpression, selectOptionExpression, elementInfoExpression, fieldKindExpression, findOptionExpression,
   sliderValueExpression, settleExpression, waitForExpression, MOD,
 } from "./actuate.js";
@@ -54,6 +54,12 @@ export class Controller {
     this.tabSeq = 0;
     this.browserSeq = 0;
     this.activeTabId = null;
+    // Ambient park-fuzz state (null timer = parked; undefined would break
+    // the startAmbient guard — initialize explicitly).
+    this.ambientTimer = null;
+    this.busy = 0;
+    this.pointerAnchor = null;
+    this.disposing = false;
   }
 
   /* ------------------------------------------------------------------ util */
@@ -257,6 +263,8 @@ export class Controller {
       throw new AxError(Codes.ELEMENT_HIDDEN, `ref "${target.ref}" has no visible box.`,
         { hint: "Scroll it into view or re-observe.", retry: "reobserve" });
     }
+    // The ambient park-fuzz anchors to the last real action position.
+    this.pointerAnchor = { x: res.x, y: res.y };
     return { x: res.x, y: res.y, covered: res.covered, hitTag: res.hitTag, from: "ref", session, frame };
   }
 
@@ -266,21 +274,90 @@ export class Controller {
 
   /* ------------------------------------------------------------- commands */
 
-  /** Single entry point — the frozen contract executes here and only here. */
+  /** Commands that own the pointer (and its precision window): ambient
+   *  park-fuzz pauses ONLY for these. Waits and observations release the
+   *  pointer — an agent that sits in ax_wait_for for 20 s must still look
+   *  like a hand is on the mouse. */
+  static POINTER_COMMANDS = new Set(["click", "type", "press", "fill", "scroll", "drag", "hover", "dialog", "upload"]);
+
+  /** Single entry point — the frozen contract executes here and only here.
+   *  busy counts in-flight POINTER commands: the idle park-fuzz runs
+   *  between them (and during waits/observations), never over one. */
   async execute(name, rawArgs = {}) {
     const args = validate(name, rawArgs);
     const entry = Contract[name];
     if (entry.group !== "browser") throw new AxError(Codes.INTERNAL, `unroutable group ${entry.group}`);
     const fn = this[`$${name}`];
     if (!fn) throw new AxError(Codes.INTERNAL, `command "${name}" has no executor`);
+    const holdsPointer = Controller.POINTER_COMMANDS.has(name);
+    if (holdsPointer) this.busy = (this.busy ?? 0) + 1;
+    if (this.ambientEnabled()) this.startAmbient();
     const started = Date.now();
-    const result = await fn.call(this, args);
-    const meta = { elapsed_ms: Date.now() - started };
-    if (result && typeof result === "object") {
-      if (entry.observed === "full") meta.observed = "full";
-      return { ...result, meta };
+    try {
+      const result = await fn.call(this, args);
+      const meta = { elapsed_ms: Date.now() - started };
+      if (result && typeof result === "object") {
+        if (entry.observed === "full") meta.observed = "full";
+        return { ...result, meta };
+      }
+      return { result, meta };
+    } finally {
+      if (holdsPointer) this.busy = Math.max(0, this.busy - 1);
+      // Re-check AFTER the command too: the FIRST open boots the virtual
+      // display (ambient becomes enabled mid-command) — the idle chain must
+      // start then, not at the next tool call.
+      if (this.ambientEnabled()) this.startAmbient();
     }
-    return { result, meta };
+  }
+
+  /* ------------------------------------------------------- ambient motion */
+
+  /** Idle pointer park-fuzz: trusted micro-jitter around the last action's
+   *  position while the agent THINKS (between tool calls). AXUSE_AMBIENT_
+   *  MOTION=0 opts out; default "auto" = on exactly in server mode (the
+   *  lane where protected-page dynamics matter; desktop benchmarks keep
+   *  their measured behavior unchanged). */
+  ambientEnabled() {
+    const v = String(process.env.AXUSE_AMBIENT_MOTION ?? "").trim().toLowerCase();
+    if (v === "0" || v === "off" || v === "false" || v === "no") return false;
+    if (v === "1" || v === "on" || v === "true" || v === "yes") return true;
+    return virtualDisplayStatus().active;
+  }
+
+  startAmbient() {
+    if (this.ambientTimer !== null) return;
+    const tick = () => {
+      this.ambientTimer = null;
+      const delay = this.ambientTick();
+      if (delay !== null) this.ambientTimer = setTimeout(tick, delay);
+    };
+    this.ambientTimer = setTimeout(tick, 900);
+  }
+
+  /** One ambient step. Returns the next delay, or null to stop (dispose).
+   *  Never moves while a pointer command is in flight, a dialog is open, or
+   *  no tab is alive — precision and dialog semantics always win over
+   *  entropy. */
+  ambientTick() {
+    if (this.disposing || this.busy > 0 || !this.ambientEnabled()) return 800; // re-check later, stay parked
+    const tab = this.activeTabId ? this.tabs.get(this.activeTabId) : null;
+    const browser = tab ? this.browsers.get(tab.browserId) : null;
+    if (!tab || tab.dialog || !browser?.handle?.conn || browser.handle.conn.closed) return 1500;
+    if (!this.pointerAnchor) {
+      const vd = virtualDisplayStatus();
+      this.pointerAnchor = { x: Math.round((vd.active ? vd.width : 1280) * (0.3 + Math.random() * 0.4)),
+        y: Math.round((vd.active ? vd.height : 800) * (0.3 + Math.random() * 0.4)) };
+    }
+    const j = planPointerJitter(this.pointerAnchor, {});
+    try {
+      browser.handle.conn.send("Input.dispatchMouseEvent",
+        { type: "mouseMoved", x: j.x, y: j.y, button: "none", modifiers: 0 }, tab.sessionId).catch(() => {});
+    } catch { /* connection gone — the next tick re-checks */ }
+    return j.nextInMs;
+  }
+
+  stopAmbient() {
+    if (this.ambientTimer !== null) { clearTimeout(this.ambientTimer); this.ambientTimer = null; }
   }
 
   async $open(a) {
@@ -987,7 +1064,9 @@ export class Controller {
     const pos = a.target ? await this.resolveTarget(tab, a.target) : null;
     const session = pos?.session;
     if (pos) {
-      await this.doSent(tab, () => doClick(this.ctx(tab, session), { x: pos.x, y: pos.y, button: "left", count: 1, modifiers: 0 }));
+      // human typing gets a human focus click too (the approach trajectory
+      // a keystroke-dynamics sampler expects on the field as well).
+      await this.doSent(tab, () => doClick(this.ctx(tab, session), { x: pos.x, y: pos.y, button: "left", count: 1, modifiers: 0, human: !!a.human }));
     }
     if (a.replace !== false) {
       await this.doSent(tab, () => pressCombo(this.ctx(tab, session), selectAllCombo()));
@@ -1277,6 +1356,8 @@ export class Controller {
   }
 
   async dispose() {
+    this.disposing = true;
+    this.stopAmbient();
     const all = [...this.browsers.values()];
     this.browsers.clear();
     this.browserIndex?.clear();

@@ -234,6 +234,22 @@ export async function click(ctx, { x, y, button = "left", count = 1, modifiers =
   await ctx.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...base }, ctx.sessionId);
 }
 
+/** Pointer park-fuzz: the idle "hand tremor" a real pointer shows between
+ *  actions — micro-jitter around the anchor (±1–3 px), a rare 8–20 px
+ *  excursion. Agent loops freeze for seconds between tool calls; a pointer
+ *  that NEVER moves between bursts is a correlation signal on
+ *  protected pages. Pure planner. */
+export function planPointerJitter(anchor, { random = Math.random } = {}) {
+  const excursion = random() < 0.08;
+  const r = excursion ? 8 + random() * 12 : 1 + random() * 2.5;
+  const a = random() * Math.PI * 2;
+  return {
+    x: Math.round(anchor.x + Math.cos(a) * r),
+    y: Math.round(anchor.y + Math.sin(a) * r),
+    nextInMs: Math.round(1400 + random() * 2800),
+  };
+}
+
 export async function hover(ctx, { x, y }) {
   await ctx.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", modifiers: 0 }, ctx.sessionId);
 }

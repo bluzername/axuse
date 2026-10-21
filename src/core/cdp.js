@@ -14,6 +14,7 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { AxError, Codes } from "./errors.js";
 import { ensureVirtualDisplay, needsNoSandbox, serverModePlan, virtualDisplayStatus } from "./vdisplay.js";
+import { managedBrowserCandidates } from "./managed-browser.js";
 
 const SEND_TIMEOUT_MS = 30_000;
 
@@ -113,6 +114,11 @@ export function browserCandidates({ extensionCapable = false, browser, ignoreEnv
       return out;
     }
   }
+  // Managed provisioned builds (`axuse install-browser`) come next: an
+  // explicitly installed, version-pinned CfT wins over whatever distro
+  // packages happen to be present — and CfT is extension-capable on every
+  // platform (unlike branded Linux/macOS builds).
+  out.push(...managedBrowserCandidates());
   if (process.platform === "win32") {
     const chrome = [];
     const chromeBeta = [];

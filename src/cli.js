@@ -31,6 +31,10 @@ Usage:
       [--request-tcc]                         macOS: explicitly open the TCC
                                               prompts (Accessibility + Screen
                                               Recording) for this binary
+  axuse install-browser [--channel Stable|Beta] [--version NNN]
+                                              provision a pinned Chrome for
+                                              Testing under ~/.cache/axuse —
+                                              no sudo, no apt repo (servers)
   axuse setup [--browser chrome|edge|chromium|chrome-for-testing]
                                               register bridge + open extension setup
   axuse open-urls <file|url|->                 inspect a URL list and write Markdown
@@ -302,7 +306,22 @@ async function doctor() {
   const hasWs = typeof WebSocket !== "undefined";
   out(`native WebSocket: ${hasWs ? "yes" : "NO — need Node >= 22"}`);
   const browser = locateBrowser();
-  out(`browser: ${browser ?? "not found (set AXUSE_BROWSER)"}`);
+  if (browser) {
+    // Version visibility: fleets drift; a 3-year-old persona is its own signal.
+    let ver = "";
+    try {
+      const v = spawnSync(browser, ["--version"], { timeout: 15_000, encoding: "utf8" });
+      ver = String(v.stdout ?? "").trim() ? ` (${String(v.stdout).trim()})` : "";
+    } catch {}
+    out(`browser: ${browser}${ver}`);
+    if (process.platform === "linux") {
+      const { managedVersion, MANAGED_ROOT_DEFAULT } = await import("./core/managed-browser.js");
+      const mv = managedVersion();
+      if (mv) out(`managed browser: ${mv} at ${MANAGED_ROOT_DEFAULT()} (axuse install-browser --version ${mv} pins a fleet)`);
+    }
+  } else {
+    out("browser: not found — run `axuse install-browser` (pins Chrome for Testing under ~/.cache — no sudo), or install distro Chrome, or set AXUSE_BROWSER");
+  }
   // Server-mode readiness, hoisted: the desktop-driver section below and the
   // smoke test both report against the same facts.
   let serverModeReady = false;
@@ -379,6 +398,12 @@ async function doctor() {
     const zombies = vd.sweepStaleXvfb({ kill: () => {} });
     if (zombies.length) {
       out(`stale Xvfb zombies: ${zombies.length} leaked axuse Xvfb process(es) (${zombies.map((z) => z.display).join(", ")}) — SIGKILLed harness processes; they are swept automatically at the next server-mode boot`);
+    }
+    const ambientOff = /^(0|off|false|no)$/i.test(String(process.env.AXUSE_AMBIENT_MOTION ?? "").trim());
+    if (serverModeReady && !ambientOff) {
+      out("ambient motion: on (trusted pointer park-fuzz between tool calls — AXUSE_AMBIENT_MOTION=0 to disable)");
+    } else if (ambientOff) {
+      out("ambient motion: disabled (AXUSE_AMBIENT_MOTION=0)");
     }
   }
   if (process.platform === "win32" || process.platform === "darwin") {
@@ -557,6 +582,35 @@ async function bridgeCmd(sub) {
   console.log("usage: axuse bridge [install|uninstall|status|verify] [--browser chrome|edge|chromium|chrome-for-testing]");
 }
 
+async function installBrowserCmd() {
+  const { installManagedBrowser, managedBinary, managedVersion, MANAGED_ROOT_DEFAULT } = await import("./core/managed-browser.js");
+  const channel = (arg("--channel") ?? "Stable").replace(/^\w/, (c) => c.toUpperCase());
+  const version = arg("--version");
+  const t0 = Date.now();
+  let lastProgress = 0;
+  console.log(`resolving Chrome for Testing: ${version ? `version ${version} (pinned)` : `channel ${channel}`}…`);
+  const r = await installManagedBrowser({
+    channel,
+    version,
+    onProgress: (got, total) => {
+      if (got - lastProgress > 20 * 1024 * 1024) {
+        lastProgress = got;
+        const mb = (got / 1024 / 1024).toFixed(0);
+        const of = total ? ` of ${(total / 1024 / 1024).toFixed(0)} MB` : " MB";
+        console.log(`  ${mb}${of}`);
+      }
+    },
+  });
+  if (r.alreadyInstalled) {
+    console.log(`✓ already installed: ${managedVersion()} → ${managedBinary()}`);
+  } else {
+    console.log(`✓ installed ${r.version} (${r.files} files, ${(r.bytes / 1024 / 1024).toFixed(0)} MB) in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    console.log(`  binary: ${r.binary} (mode ${(r.mode ?? 0).toString(8)})`);
+  }
+  console.log(`axuse finds the managed build automatically; pin explicitly with AXUSE_BROWSER=${managedBinary()}`);
+  console.log(`managed root: ${MANAGED_ROOT_DEFAULT()} (AXUSE_MANAGED_BROWSER_DIR to relocate — mount a cached volume there for fleets)`);
+}
+
 try {
   switch (command) {
     case "mcp":
@@ -573,6 +627,9 @@ try {
       break;
     case "plugins":
       await pluginsCmd();
+      break;
+    case "install-browser":
+      await installBrowserCmd();
       break;
     case "solve":
       await solveCmd();

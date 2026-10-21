@@ -33,8 +33,9 @@ code.
 
 You need **Node.js 22+** and a Chromium-family browser (Chrome, Edge,
 Chromium, or Chrome for Testing; found automatically, or set
-`AXUSE_BROWSER=/path/to/chrome`).
-Nothing else: axuse has no npm dependencies.
+`AXUSE_BROWSER=/path/to/chrome`). On a bare server with no browser and no
+sudo: `node src/cli.js install-browser` provisions a pinned Chrome for
+Testing under `~/.cache/axuse` — nothing else: axuse has no npm dependencies.
 
 **1. Get it and check the environment**
 
@@ -88,6 +89,7 @@ element refs like `[ref=e7]`. Each action returns only what changed.
 | `AXUSE_TIMEZONE` | IANA `TZ` for the Chrome process — `Date`/`Intl` in pages and workers match the egress persona (validated by `doctor`) |
 | `AXUSE_LANG` | `--accept-lang` for Chrome — `navigator.language(s)` and the `Accept-Language` header match the egress persona |
 | `AXUSE_PROXY` | route every launched browser through a proxy (`http://`·`socks5://`, credentials supported — answered over CDP); `ax_open {proxy}` sets it per launch |
+| `AXUSE_AMBIENT_MOTION` | `0` disables idle pointer park-fuzz (default: automatic in server mode — the agent's "thinking" pauses still show a live hand) |
 | `AXUSE_NO_SANDBOX=1` | force `--no-sandbox` (auto for root/container server runs) |
 | `AXUSE_NEUTRALIZE_WEBDRIVER=0` | disable the `navigator.webdriver` posture-fix fallback (the `AutomationControlled` launch flag already fixes it at the source) |
 | `AXUSE_HEADLESS=1` | launch the browser without a window — **trusted internal pages only**: challenge/anti-bot pages detect headless first; servers get server mode instead |

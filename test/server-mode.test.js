@@ -25,6 +25,7 @@ import {
   isStaleAxuseXvfb, sweepStaleXvfb,
 } from "../src/core/vdisplay.js";
 import { locateBrowser, postureScript } from "../src/core/cdp.js";
+import { planPointerJitter } from "../src/core/actuate.js";
 import { Controller } from "../src/core/controller.js";
 
 /* ------------------------------------------------------------ unit lane */
@@ -132,6 +133,22 @@ test("server mode: IANA timezone validation (the same engine Chrome uses)", () =
   assert.equal(validTimezone("Not/AZone"), null);
   assert.equal(validTimezone(""), null);
   assert.equal(validTimezone(null), null);
+});
+
+test("server mode: pointer park-fuzz stays tight with rare excursions, human cadence", () => {
+  let i = 0;
+  const seq = () => [0.01, 0.5, 0.99, 0.3, 0.7][i++ % 5];
+  const anchor = { x: 500, y: 400 };
+  let excursions = 0;
+  let micros = 0;
+  for (let n = 0; n < 60; n++) {
+    const j = planPointerJitter(anchor, { random: seq });
+    const d = Math.hypot(j.x - anchor.x, j.y - anchor.y);
+    assert.ok(d >= 1 && d <= 20, `jitter distance ${d}`);
+    if (d > 5) excursions++; else micros++;
+    assert.ok(j.nextInMs >= 1400 && j.nextInMs <= 4200, `cadence ${j.nextInMs}`);
+  }
+  assert.ok(excursions >= 1 && micros > excursions, `mix: ${micros} micro / ${excursions} excursions`);
 });
 
 test("server mode: posture script — conditional, tamper-invisible, opt-in persona overrides", () => {
@@ -321,6 +338,39 @@ test("server mode: persona coherence — TZ, language and core/memory overrides 
   assert.equal(p.webdriver, false);
   assert.equal(p.webgl, true);
   assert.ok(typeof p.renderer === "string" && p.renderer.length > 0, `renderer reported honestly: ${p.renderer}`);
+});
+
+test("server mode: ambient pointer park-fuzz moves the pointer while the agent idles", { skip: liveSkip }, async (t) => {
+  const restore = withDeadDisplay();
+  t.after(restore);
+  const c = new Controller();
+  t.after(() => c.dispose());
+  await c.execute("open", {
+    url: `data:text/html,<button id="b" style="margin:200px">x</button><script>
+      window.__m = [];
+      ["mousemove"].forEach((n) => document.addEventListener(n, (e) =>
+        window.__m.push({ x: Math.round(e.clientX), y: Math.round(e.clientY), trusted: e.isTrusted })));
+    </script>`,
+    settle_ms: 150,
+  });
+  // Anchor the pointer with a real action, then let the agent "think".
+  await c.execute("click", { target: { ref: "e1" }, settle_ms: 100 });
+  const anchor = await c.execute("evaluate", { expression: "(() => { const r = document.getElementById('b').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()" })
+    .then((r) => JSON.parse(r.value));
+  await c.execute("wait_for", { expression: "window.__m.length >= 3", timeout_ms: 12_000 });
+  const moves = JSON.parse((await c.execute("evaluate", { expression: "window.__m" })).value ?? "[]");
+  assert.ok(moves.length >= 3, `ambient moves arrived (${moves.length})`);
+  assert.ok(moves.every((m) => m.trusted), "ambient moves are trusted input");
+  const after = moves.filter((m) => Math.hypot(m.x - anchor.x, m.y - anchor.y) <= 25);
+  assert.ok(after.length >= 2, `jitter parks near the action anchor (${after.length}/${moves.length})`);
+  // Opt-out honored: no ambient while disabled.
+  const prevOff = process.env.AXUSE_AMBIENT_MOTION;
+  process.env.AXUSE_AMBIENT_MOTION = "0";
+  t.after(() => { if (prevOff === undefined) delete process.env.AXUSE_AMBIENT_MOTION; else process.env.AXUSE_AMBIENT_MOTION = prevOff; });
+  const n0 = JSON.parse((await c.execute("evaluate", { expression: "window.__m.length" })).value ?? "0");
+  await new Promise((ok) => setTimeout(ok, 3500));
+  const n1 = JSON.parse((await c.execute("evaluate", { expression: "window.__m.length" })).value ?? "0");
+  assert.equal(n1, n0, "AXUSE_AMBIENT_MOTION=0 parks the pointer");
 });
 
 test("server mode: AXUSE_HEADLESS=1 lane still opens headless on a dead display", { skip: liveSkip }, async (t) => {
