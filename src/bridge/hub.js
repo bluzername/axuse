@@ -163,6 +163,7 @@ export class BridgeHub {
               this.broadcastStatus();
               for (const h of this.eventHandlers) { try { h({ kind: "ext-online" }); } catch {} }
             } else {
+              conn.openedTabs = new Set();
               this.clients.add(conn);
               this.writeTo(sock, { t: "hello-ack", ok: true, ext: !!this.extConn });
             }
@@ -178,7 +179,14 @@ export class BridgeHub {
       }
     });
     sock.on("close", () => {
-      if (conn.role === "client") this.clients.delete(conn);
+      if (conn.role === "client") {
+        this.clients.delete(conn);
+        // A client process that went away (MCP server killed, agent run
+        // ended) leaves tabs nobody holds an id for: close them.
+        for (const tabId of conn.openedTabs ?? []) {
+          void this.rpc("close_tab", { tabId }, 5000).catch(() => {});
+        }
+      }
       if (this.extConn === conn) {
         this.extConn = null;
         this.broadcastStatus();
@@ -225,6 +233,8 @@ export class BridgeHub {
     if (!msg || msg.t !== "req") return;
     try {
       const res = await this.rpc(msg.method, msg.params);
+      if (res.ok && msg.method === "open_tab" && res.result?.tabId != null) conn.openedTabs?.add(res.result.tabId);
+      if (msg.method === "close_tab") conn.openedTabs?.delete(msg.params?.tabId);
       conn.write({ t: "res", id: msg.id, ok: res.ok, result: res.result, error: res.error });
     } catch (e) {
       conn.write({ t: "res", id: msg.id, ok: false, error: e instanceof AxError ? e.toJSON() : { code: Codes.INTERNAL, message: String(e.message ?? e) } });

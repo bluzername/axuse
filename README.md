@@ -297,8 +297,21 @@ axuse bridge                # hub (or it starts on demand with the MCP server)
 ```
 
 Load `bridge/extension` unpacked in Chrome/Edge (Developer mode → Load
-unpacked), then `ax_open { url, backend: "extension" }`. Your browser, your
+unpacked), then `ax_open { url }`: while the extension is connected, an
+omitted `backend` picks it (the result reports `backend`; pin it with
+`AXUSE_BACKEND=cdp|extension`). Your browser, your
 logged-in sessions, tabs visible to you; `ax_close` closes only axuse's tabs.
+Input and navigation bring a hidden axuse tab forward first (background tabs
+get no requestAnimationFrame, so SPAs never finish wiring their handlers;
+`AXUSE_VISIBLE_GUARD=0` opts out). Tabs are shared by every caller of one
+server, so `tab_id` is required once more than one tab is controlled
+(`AXUSE_REQUIRE_TAB_ID=0` restores the implicit active tab). Tabs no call has
+touched for 30 minutes are closed (`AXUSE_TAB_IDLE_MS`, `0` = off), and the
+hub closes the tabs of a client process that disconnects. Top-level HTML/text
+`data:` URLs load through `Page.setDocumentContent` on this backend (Chrome
+refuses the navigation); other `data:` types need localhost. For long
+articles whose snapshot is cut or shortened, `ax_observe {mode:"text"}`
+returns the full readable text.
 The whole chain — native messaging framing, hub auth, CDP-over-chrome.debugger,
 diffed snapshots, trusted clicks — is covered by `test/bridge.test.js`.
 

@@ -52,6 +52,7 @@ export function pageSerializer(opts) {
   var n = 0;
   var chars = 0;
   var truncated = false;
+  var clipped = 0; // long texts shortened with "…" (full text: observe mode "text")
 
   var SKIP = { SCRIPT: 1, STYLE: 1, LINK: 1, META: 1, NOSCRIPT: 1, TEMPLATE: 1, HEAD: 1, TITLE: 1, SVG: 1 };
   // Elements whose text IS their label (buttons with icon spans, links).
@@ -66,7 +67,9 @@ export function pageSerializer(opts) {
   function clip(t, max) {
     max = max || MAX_TEXT;
     t = (t == null ? "" : String(t)).replace(/\s+/g, " ").trim();
-    return t.length > max ? t.slice(0, max) + "…" : t;
+    if (t.length <= max) return t;
+    clipped++;
+    return t.slice(0, max) + "…";
   }
   function q(t) { return String(t).replace(/"/g, "'"); }
   function directText(el) {
@@ -383,6 +386,7 @@ export function pageSerializer(opts) {
     entries: entries,
     textLines: textLines,
     truncated: truncated,
+    clipped: clipped,
     refCount: n,
     scroll: { x: window.scrollX, y: window.scrollY },
   };

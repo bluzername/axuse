@@ -290,7 +290,8 @@ test("server mode: headed Chrome auto-boots a virtual display (anti-bot posture)
   assert.equal(r2.display?.id, r.display.id);
 
   // And the trusted-input path works on it (the solver lane's primitives).
-  const clicked = await c.execute("click", { target: { x: 8, y: 8 }, settle_ms: 50 });
+  // Two tabs are controlled now — the strict lane requires the tab id.
+  const clicked = await c.execute("click", { target: { x: 8, y: 8 }, tab_id: r2.tab_id, settle_ms: 50 });
   assert.ok(clicked, "input dispatch on the virtual display is fine");
 });
 

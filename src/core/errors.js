@@ -51,7 +51,9 @@ export class AxError extends Error {
   /**
    * @param {keyof typeof Codes} code
    * @param {string} message
-   * @param {{hint?: string, retry?: keyof typeof Retry, sideEffect?: "none"|"uncertain"}} [extra]
+   * @param {{hint?: string, retry?: keyof typeof Retry, sideEffect?: "none"|"uncertain", facts?: object}} [extra]
+   *   facts: extra machine-readable fields surfaced verbatim (e.g. tab_id of
+   *   a tab the failed call created, so the caller can still close it).
    */
   constructor(code, message, extra = {}) {
     super(message);
@@ -60,6 +62,7 @@ export class AxError extends Error {
     this.hint = extra.hint;
     this.retry = extra.retry;
     this.sideEffect = extra.sideEffect ?? "none";
+    if (extra.facts) this.facts = extra.facts;
   }
 
   toJSON() {
@@ -69,6 +72,7 @@ export class AxError extends Error {
       ...(this.hint ? { hint: this.hint } : {}),
       ...(this.retry ? { retry: this.retry } : {}),
       side_effect: this.sideEffect,
+      ...(this.facts ?? {}),
     };
   }
 }

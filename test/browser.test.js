@@ -157,7 +157,7 @@ test("fill: foreign-tab refs fail with a hint naming the owning tab", { skip: !h
     headless: true, settle_ms: 120,
   });
   assert.match(b.observation.text, /button "two"/);
-  const err = await c.execute("fill", { fields: [{ ref: "e1", value: "hello" }], settle_ms: 80 }).then(
+  const err = await c.execute("fill", { tab_id: b.tab_id, fields: [{ ref: "e1", value: "hello" }], settle_ms: 80 }).then(
     () => { throw new Error("expected rejection"); },
     (e) => e,
   );

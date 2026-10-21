@@ -29,6 +29,25 @@ const MAX_EVAL_CHARS = 64_000; // Codex DOM text cap: 64k default
 const EVENT_TEXT_CAP = 2000;
 const MAX_OPEN_MANY_URLS = 100;
 const MOD_MASK = { alt: 1, ctrl: 2, control: 2, meta: 4, cmd: 4, command: 4, shift: 8 };
+const CLOSE_CAUSES = {
+  idle_reaped: "axuse closed it after it sat unused for AXUSE_TAB_IDLE_MS (default 30 min)",
+  window_closed: "its browser window was closed",
+  closed_outside_axuse: "it was closed outside axuse (the user, another agent or another extension)",
+  closed: "it no longer exists in the browser",
+};
+
+/** Idle-tab reaper window: tabs no call has touched for this long are
+ *  closed (agents that ended without ax_close). AXUSE_TAB_IDLE_MS=0 off. */
+function tabIdleMs() {
+  const v = Number(process.env.AXUSE_TAB_IDLE_MS ?? 30 * 60_000);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/** AXUSE_REQUIRE_TAB_ID=0 restores the implicit active-tab default when
+ *  several tabs are controlled. */
+function requireTabId() {
+  return !/^(0|false|off|no)$/i.test(String(process.env.AXUSE_REQUIRE_TAB_ID ?? "").trim());
+}
 
 /** Event methods worth a round trip — the signal, not the noise. */
 const RECORDED_EVENTS = new Set([
@@ -54,6 +73,9 @@ export class Controller {
     this.tabSeq = 0;
     this.browserSeq = 0;
     this.activeTabId = null;
+    // tab_id → why it disappeared (tab removed in the browser, not by
+    // ax_close): later calls on it fail with the cause, not a bare NO_TAB.
+    this.closedTabs = new Map();
     // Ambient park-fuzz state (null timer = parked; undefined would break
     // the startAmbient guard — initialize explicitly).
     this.ambientTimer = null;
@@ -65,11 +87,88 @@ export class Controller {
   /* ------------------------------------------------------------------ util */
 
   tabOrActive(tabId) {
+    if (tabId == null && this.tabs.size > 1 && requireTabId()) {
+      // Every agent on this server shares one tab table: the "active tab" is
+      // whichever tab ANY caller opened last, so an implicit target is a
+      // cross-agent misfire waiting to happen.
+      const ids = [...this.tabs.keys()];
+      const shown = ids.length > 12 ? `${ids.slice(-12).join(", ")} and ${ids.length - 12} more` : ids.join(", ");
+      throw new AxError(Codes.COMMAND_REJECTED,
+        `tab_id is required: ${ids.length} tabs are controlled (${shown}; active ${this.activeTabId}).`,
+        { hint: "Pass the tab_id your ax_open returned. Tabs are shared by every caller of this axuse server, so the active tab may belong to someone else (AXUSE_REQUIRE_TAB_ID=0 restores the implicit default).", retry: "never" });
+    }
     const id = tabId ?? this.activeTabId;
+    if (id && this.tabs.has(id)) this.tabs.get(id).lastUsedAt = Date.now();
     if (!id || !this.tabs.has(id)) {
-      throw new AxError(Codes.NO_TAB, "No controlled tab. Open one with ax_open first.", { retry: "never" });
+      const cause = id ? this.closedTabs.get(id) : null;
+      if (cause) {
+        throw new AxError(Codes.NO_TAB, `Tab ${id} is gone: ${CLOSE_CAUSES[cause] ?? cause}.`,
+          { hint: "Open a new tab with ax_open.", retry: "never" });
+      }
+      throw new AxError(Codes.NO_TAB, tabId ? `No controlled tab "${tabId}" (closed or never opened). Open one with ax_open.` : "No controlled tab. Open one with ax_open first.", { retry: "never" });
     }
     return this.tabs.get(id);
+  }
+
+  /**
+   * Visible-tab guard. A tab hidden in the user's own Chrome (extension or
+   * cdp_url attach; launched browsers run with background throttling off)
+   * gets no requestAnimationFrame and ~1 s timers, so SPAs whose handlers
+   * are wired on rAF/idle callbacks (Google search) never finish
+   * initialising and swallow Enter and clicks. Bring the tab forward; if
+   * its window is occluded or minimised, force one frame with a 1x1
+   * capture (the verified workaround), then let one frame run.
+   */
+  async ensureVisible(tab) {
+    const handle = tab.browser.handle;
+    if (typeof handle.bringToFront !== "function" || handle.launched || tab.dialog || tab.closed) return null;
+    if (/^(0|false|off|no)$/i.test(String(process.env.AXUSE_VISIBLE_GUARD ?? "").trim())) return null;
+    const visibility = () => this.evalInTab(tab, "document.visibilityState").catch(() => null);
+    if ((await visibility()) !== "hidden") return null;
+    try { await handle.bringToFront(tab.sessionId); } catch {}
+    let state = null;
+    for (let i = 0; i < 10; i++) {
+      state = await visibility();
+      if (state !== "hidden") break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (state === "hidden") {
+      try {
+        await handle.conn.send("Page.captureScreenshot",
+          { format: "jpeg", quality: 1, clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 } }, tab.sessionId);
+      } catch {}
+    }
+    // One frame so rAF-gated initialisation runs before input lands
+    // (host-bounded: a still-hidden page's own timers may be throttled).
+    await Promise.race([
+      this.evalInTab(tab, "new Promise((r) => requestAnimationFrame(() => r(true)))", { awaitPromise: true }).catch(() => null),
+      new Promise((r) => setTimeout(r, 400)),
+    ]);
+    this.recordEvent(tab, "tab.activated", { was: "hidden", visible: state !== "hidden" });
+    return { activated: true, visible: state !== "hidden" };
+  }
+
+  /**
+   * Backend for ax_open/ax_open_many when the caller names none.
+   * AXUSE_BACKEND=cdp|extension pins it; the default "auto" picks the
+   * user's own signed-in Chrome whenever the bridge hub reports a connected
+   * axuse extension, else a CDP-launched browser. Launch-only options
+   * (headless, profile_dir, proxy, executable_path) and cdp_url mean cdp.
+   */
+  async resolveBackend(a, headless) {
+    if (a.backend) return { backend: a.backend, reason: "requested" };
+    if (a.cdp_url) return { backend: "cdp", reason: "cdp_url" };
+    const pref = String(process.env.AXUSE_BACKEND ?? "auto").trim().toLowerCase();
+    if (pref === "cdp" || pref === "extension") return { backend: pref, reason: "AXUSE_BACKEND" };
+    if (headless || a.executable_path || a.profile_dir || a.proxy) return { backend: "cdp", reason: "launch option" };
+    const extId = this.browserIndex.get("extension");
+    const ext = extId ? this.browsers.get(extId) : null;
+    if (ext && !ext.handle.conn.closed && ext.handle.bridge?.extOnline?.() !== false) {
+      return { backend: "extension", reason: "axuse extension connected" };
+    }
+    const { extensionOnline } = await import("../bridge/backend.js");
+    if (await extensionOnline()) return { backend: "extension", reason: "axuse extension connected" };
+    return { backend: "cdp", reason: "no axuse extension connected" };
   }
 
   /** Guard: acting on refs from an older observation than the current page state. */
@@ -116,6 +215,7 @@ export class Controller {
     const textLines = [...res.textLines];
     let text = res.text;
     let truncated = res.truncated;
+    const clipped = res.clipped ?? 0;
     const frameNotes = [];
     // Frames in slot order; each frame's own serializer runs in its session.
     const frames = [...tab.frames.values()].sort((a, b) => a.slot - b.slot);
@@ -159,6 +259,7 @@ export class Controller {
       url: res.url,
       title: res.title,
       truncated,
+      clipped,
       refCount: entries.length,
       frameCount: frames.length,
       text,
@@ -179,8 +280,8 @@ export class Controller {
     } catch (e) {
       if (e instanceof AxError && e.code === Codes.TIMEOUT) {
         throw new AxError(Codes.NAVIGATION_IN_PROGRESS,
-          "The tab is navigating (execution context replaced mid-call).",
-          { hint: "Call ax_observe once navigation settles.", retry: "reobserve", sideEffect: "uncertain" });
+          "The tab is navigating (execution context replaced mid-call), or the page stalled past the RPC window.",
+          { hint: "Call ax_observe once navigation settles. Background tabs in the user's Chrome throttle page timers; input and wait commands bring the tab forward first.", retry: "reobserve", sideEffect: "uncertain" });
       }
       throw e;
     }
@@ -207,7 +308,8 @@ export class Controller {
     const snap = await this.serialize(tab, { maxNodes, maxChars });
     if (snap.url) tab.url = snap.url;
     if (snap.title !== undefined) tab.title = snap.title;
-    const header = `url: ${snap.url}\ntitle: ${snap.title}\nentries: ${snap.entries.length} refs, state ${snap.stateId}${snap.truncated ? "\nnote: truncated by budget — pass max_nodes/max_chars or observe in pieces" : ""}`;
+    const budget = snap.text.length >= (maxChars ?? 24000) ? `${maxChars ?? 24000}-char` : `${maxNodes ?? 300}-element`;
+    const header = `url: ${snap.url}\ntitle: ${snap.title}\nentries: ${snap.entries.length} refs, state ${snap.stateId}${snap.truncated ? `\nnote: truncated by the ${budget} budget — ax_observe {mode:"text"} returns the full readable text; find:"..." locates refs anywhere; or raise max_chars (≤200000) / max_nodes (≤2000)` : ""}${!snap.truncated && snap.clipped ? `\nnote: ${snap.clipped} long text${snap.clipped === 1 ? "" : "s"} shortened with "…" — ax_observe {mode:"text"} returns the full readable text` : ""}`;
     const fullText = `${header}\n${snap.text}`;
     if (mode === "full" || !tab.lastSnapshot) {
       tab.lastSnapshot = snap;
@@ -280,6 +382,10 @@ export class Controller {
    *  like a hand is on the mouse. */
   static POINTER_COMMANDS = new Set(["click", "type", "press", "fill", "scroll", "drag", "hover", "dialog", "upload"]);
 
+  /** Commands that need a visible tab (navigation and input): the
+   *  visible-tab guard runs before them. ax_open runs it itself. */
+  static VISIBLE_COMMANDS = new Set(["navigate", "go", "click", "type", "press", "fill", "scroll", "drag", "hover", "select", "upload", "wait_for"]);
+
   /** Single entry point — the frozen contract executes here and only here.
    *  busy counts in-flight POINTER commands: the idle park-fuzz runs
    *  between them (and during waits/observations), never over one. */
@@ -294,8 +400,14 @@ export class Controller {
     if (this.ambientEnabled()) this.startAmbient();
     const started = Date.now();
     try {
+      let activated = null;
+      if (Controller.VISIBLE_COMMANDS.has(name)) {
+        const id = args.tab_id ?? (this.tabs.size === 1 || !requireTabId() ? this.activeTabId : null);
+        const tab = id ? this.tabs.get(id) : null;
+        if (tab) activated = await this.ensureVisible(tab).catch(() => null);
+      }
       const result = await fn.call(this, args);
-      const meta = { elapsed_ms: Date.now() - started };
+      const meta = { elapsed_ms: Date.now() - started, ...(activated ? { tab_activated: true } : {}) };
       if (result && typeof result === "object") {
         if (entry.observed === "full") meta.observed = "full";
         return { ...result, meta };
@@ -366,17 +478,42 @@ export class Controller {
       throw new AxError(Codes.COMMAND_REJECTED, `url must start with http(s)://, file://, about:, data: or blob:`, { retry: "never" });
     }
     const headless = a.headless ?? /^(1|true)$/i.test(process.env.AXUSE_HEADLESS ?? "");
-    const browser = await this.ensureBrowser({ headless, cdpUrl: a.cdp_url, executablePath: a.executable_path, backend: a.backend, profileDir: a.profile_dir, proxy: a.proxy, proxyBypass: a.proxy_bypass });
+    const { backend, reason } = await this.resolveBackend(a, headless);
+    const browser = await this.ensureBrowser({ headless, cdpUrl: a.cdp_url, executablePath: a.executable_path, backend, profileDir: a.profile_dir, proxy: a.proxy, proxyBypass: a.proxy_bypass });
     const { targetId, sessionId } = await browser.handle.createTab("about:blank");
-    const tab = this.registerTab(browser, targetId, sessionId, "about:blank");
+    let tab;
+    try {
+      tab = this.registerTab(browser, targetId, sessionId, "about:blank");
+      await this.ensureVisible(tab).catch(() => null);
+      await this.navigateInTab(tab, url, a.settle_ms ?? 300);
+    } catch (e) {
+      // A failed open must not leak a blank tab nobody holds an id for
+      // (downloads end in ERR_ABORTED, hung navigations time out).
+      if (tab) this.deregisterTab(tab);
+      try { await browser.handle.closeTabTarget(targetId); } catch {}
+      if (e instanceof AxError) {
+        throw new AxError(e.code, `${e.message} The tab axuse created for it was closed.`,
+          { ...e, facts: { ...(e.facts ?? {}), tab_closed: true } });
+      }
+      throw e;
+    }
     const tabId = tab.tabId;
-    await this.navigateInTab(tab, url, a.settle_ms ?? 300);
-    const observation = await this.observation(tab, { mode: "full" });
+    let observation;
+    try {
+      observation = await this.observation(tab, { mode: "full" });
+    } catch (e) {
+      // Navigation succeeded, so keep the tab — but hand its id back.
+      if (e instanceof AxError) {
+        throw new AxError(e.code, e.message, { ...e, facts: { ...(e.facts ?? {}), tab_id: tabId, browser_id: browser.browserId } });
+      }
+      throw e;
+    }
     // Server-mode fact: headed Chrome on an auto-booted virtual display —
     // the anti-bot-safe lane on display-less hosts (never --headless).
     const vd = virtualDisplayStatus();
     return {
-      browser_id: browser.browserId, tab_id: tabId, observation, dialog: tab.dialog ?? null,
+      browser_id: browser.browserId, tab_id: tabId, backend, ...(a.backend ? {} : { backend_reason: reason }),
+      observation, dialog: tab.dialog ?? null,
       ...(vd.active ? { display: { id: vd.display, virtual: true, width: vd.width, height: vd.height } } : {}),
     };
   }
@@ -461,7 +598,7 @@ export class Controller {
     const tabId = `t${++this.tabSeq}`;
     const tab = {
       tabId, browserId: browser.browserId, targetId, sessionId,
-      url, title: "", stateId: 0, lastSnapshot: null,
+      url, title: "", stateId: 0, lastSnapshot: null, lastUsedAt: Date.now(),
       events: [], eventSeq: 0, dialog: null, closed: false,
       frames: new Map(), // OOPIF child sessionId → {slot, sessionId, targetId, url}
       frameSeq: 0,
@@ -474,7 +611,31 @@ export class Controller {
     browser.tabs.add(tabId);
     this.activeTabId = tabId;
     this.attachEventRouting(tab);
+    this.startReaper();
     return tab;
+  }
+
+  /** Every agent shares this server's tab table, and a subagent that ends
+   *  without ax_close leaves its tabs behind (the server cannot see agents
+   *  end). Close tabs nothing has touched for AXUSE_TAB_IDLE_MS. */
+  startReaper() {
+    if (this.reaperTimer || !tabIdleMs()) return;
+    this.reaperTimer = setInterval(() => { void this.reapIdleTabs(); }, Math.min(60_000, tabIdleMs()));
+    if (this.reaperTimer.unref) this.reaperTimer.unref();
+  }
+
+  async reapIdleTabs(now = Date.now()) {
+    const idle = tabIdleMs();
+    if (!idle || this.disposing) return [];
+    const reaped = [];
+    for (const tab of [...this.tabs.values()]) {
+      if (now - (tab.lastUsedAt ?? now) < idle) continue;
+      this.closedTabs.set(tab.tabId, "idle_reaped");
+      this.deregisterTab(tab);
+      try { await tab.browser.handle.closeTabTarget(tab.targetId); } catch {}
+      reaped.push(tab.tabId);
+    }
+    return reaped;
   }
 
   /**
@@ -525,7 +686,7 @@ export class Controller {
     const observation = await this.observation(newest, { mode: "full" }).catch(() => null);
     return {
       opened_tabs: ids,
-      tab_note: `The action opened a new tab ${newest.tabId} (now the active tab). Its observation is below; the original tab ${tab.tabId} is unchanged — pass tab_id:"${tab.tabId}" to act there again.`,
+      tab_note: `The action opened a new tab ${newest.tabId}. Its observation is below; the original tab ${tab.tabId} is unchanged — pass tab_id:"${newest.tabId}" to act in the new tab, tab_id:"${tab.tabId}" to act here again.`,
       new_tab: { tab_id: newest.tabId, observation },
     };
   }
@@ -647,6 +808,20 @@ export class Controller {
         if (RECORDED_EVENTS.has(msg.method)) {
           this.recordEvent(tab, msg.method, msg.params, `f${tab.frames.get(msg.sessionId).slot}`);
         }
+        return;
+      }
+      if (msg.sessionId === tab.sessionId && msg.method === "tab.removed") {
+        // The tab is gone in the browser (extension backend): drop it so it
+        // never stays the implicit target, and remember why.
+        const cause = msg.params?.cause ?? "closed";
+        if (cause !== "axuse_close" && !tab.closed) {
+          this.closedTabs.set(tab.tabId, cause);
+          this.deregisterTab(tab);
+        }
+        return;
+      }
+      if (msg.sessionId === tab.sessionId && msg.method === "debugger.detached") {
+        this.recordEvent(tab, "debugger.detached", { reason: msg.params?.reason ?? null });
         return;
       }
       if (msg.sessionId !== tab.sessionId || !RECORDED_EVENTS.has(msg.method)) return;
@@ -785,6 +960,7 @@ export class Controller {
   }
 
   async navigateInTab(tab, url, settleMs = 300) {
+    if (tab.browser.key === "extension" && /^data:/i.test(url)) return this.loadDataUrl(tab, url, settleMs);
     let res;
     try {
       res = await tab.browser.handle.conn.send("Page.navigate", { url }, tab.sessionId);
@@ -794,10 +970,51 @@ export class Controller {
     }
     if (res && res.errorText) {
       throw new AxError(Codes.NAVIGATION_IN_PROGRESS, `Navigation error: ${res.errorText} (${url})`,
-        { hint: "The tab may be blocked by the network or bot detection. Observe to inspect.", retry: "never" });
+        { hint: /ERR_ABORTED/.test(res.errorText)
+          ? "ERR_ABORTED usually means the URL is a download (PDF, attachment) or a top-level navigation the browser refuses — it is not a page to drive; fetch the file another way."
+          : "The tab may be blocked by the network or bot detection. Observe to inspect.", retry: "never" });
     }
     tab.url = url;
     tab.lastSnapshot = null; // refs died with the old document
+    await this.settle(tab, 4000, settleMs);
+  }
+
+  /** Extension backend: Chrome refuses top-level data: navigations from
+   *  chrome.debugger (ERR_ABORTED). HTML/text data: URLs are loaded by
+   *  writing their decoded content into the tab's own about:blank document. */
+  async loadDataUrl(tab, url, settleMs) {
+    const m = /^data:([^,]*?),(.*)$/is.exec(url);
+    const meta = (m?.[1] ?? "").toLowerCase();
+    const mime = meta.split(";")[0].trim() || "text/plain";
+    if (!m || !/^(text\/html|text\/plain|application\/xhtml\+xml)$/.test(mime)) {
+      throw new AxError(Codes.COMMAND_REJECTED,
+        `The extension backend cannot open a top-level ${mime} data: URL (Chrome blocks top-level data: navigations).`,
+        { hint: "Serve the content from localhost (http://127.0.0.1:...) or use backend cdp.", retry: "never" });
+    }
+    let body;
+    try {
+      body = /;base64$/.test(meta) ? Buffer.from(m[2], "base64").toString("utf8") : decodeURIComponent(m[2]);
+    } catch {
+      throw new AxError(Codes.COMMAND_REJECTED, "Malformed data: URL (could not decode the payload).", { retry: "never" });
+    }
+    const html = mime === "text/plain"
+      ? `<!doctype html><pre>${body.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])}</pre>`
+      : body;
+    const conn = tab.browser.handle.conn;
+    try {
+      if (!/^about:blank/.test(tab.url)) {
+        await conn.send("Page.navigate", { url: "about:blank" }, tab.sessionId);
+        await this.settle(tab, 2000, 50);
+      }
+      const { frameTree } = await conn.send("Page.getFrameTree", {}, tab.sessionId);
+      await conn.send("Page.setDocumentContent", { frameId: frameTree.frame.id, html }, tab.sessionId);
+    } catch (e) {
+      throw new AxError(Codes.NAVIGATION_IN_PROGRESS, `Loading the data: URL failed: ${e.message}`,
+        { hint: "Serve the content from localhost instead.", retry: "never" });
+    }
+    tab.url = "about:blank";
+    tab.lastSnapshot = null;
+    this.recordEvent(tab, "data_url.loaded", { mime, via: "Page.setDocumentContent", note: "page origin is about:blank, not data:" });
     await this.settle(tab, 4000, settleMs);
   }
 
@@ -852,6 +1069,7 @@ export class Controller {
     const maxNodes = Math.min(a.max_nodes ?? 300, 2000);
     const maxChars = Math.min(a.max_chars ?? 24000, 200000);
     if (a.find) return { tab_id: tab.tabId, observation: await this.findObservation(tab, a.find) };
+    if (mode === "text") return { tab_id: tab.tabId, observation: await this.textObservation(tab, Math.min(a.max_chars ?? 100_000, 200_000)) };
     const observation = await this.observation(tab, { mode, maxNodes, maxChars });
     return { tab_id: tab.tabId, observation };
   }
@@ -883,6 +1101,21 @@ export class Controller {
     }
     const text = [...head, `find "${needle}": ${hits ? `${hits} match${hits > 1 ? "es" : ""}` : "no matches"} (of ${body.length} lines)`, ...out].join("\n");
     return { ...obs, mode: "find", text };
+  }
+
+  /** Readable page text, no refs: the long-article read that snapshot
+   *  budgets cut (news pages, filings). Does not advance state_id, so refs
+   *  from the last snapshot stay valid. */
+  async textObservation(tab, maxChars) {
+    const res = await this.evalInTab(tab, `(() => {
+      const t = (document.body ? document.body.innerText : document.documentElement.innerText) || "";
+      return { url: location.href, title: document.title, text: t.slice(0, ${maxChars}), length: t.length };
+    })()`);
+    const truncated = res.length > maxChars;
+    return {
+      mode: "text", url: res.url, title: res.title, chars: res.length, truncated,
+      text: `url: ${res.url}\ntitle: ${res.title}\nchars: ${res.length}${truncated ? ` (first ${maxChars} shown — raise max_chars, ≤200000)` : ""}\n${res.text}`,
+    };
   }
 
   async $click(a) {
@@ -1380,6 +1613,7 @@ export class Controller {
   async dispose() {
     this.disposing = true;
     this.stopAmbient();
+    if (this.reaperTimer) { clearInterval(this.reaperTimer); this.reaperTimer = null; }
     const all = [...this.browsers.values()];
     this.browsers.clear();
     this.browserIndex?.clear();

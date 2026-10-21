@@ -374,6 +374,8 @@ export class BrowserHandle {
     this.ephemeral = true; // false: a persistent A2 profile — never deleted
     this.launched = false;
     this.proxyAuth = null; // { username, password } when launched with proxy creds
+    this.persona = null; // { timezone?, lang? } when launched with per-instance persona
+    this.startupPages = []; // the browser's own startup page targets — closed after our first tab
     this.tabs = new Map(); // tab_id → session bookkeeping (owned by controller)
   }
 
@@ -382,7 +384,7 @@ export class BrowserHandle {
    *  philosophy); headless is opt-in for servers and tests.
    *  `userDataDir` (plugin prerequisite A2, session-vault): reuse a PERSISTENT
    *  profile — not deleted on dispose, only swept by nobody but the owner. */
-  static async launch({ executablePath, headless = false, extraArgs = [], userDataDir, profileRoot: profileRootOverride, proxy, proxyBypass } = {}) {
+  static async launch({ executablePath, headless = false, extraArgs = [], userDataDir, profileRoot: profileRootOverride, proxy, proxyBypass, timezone, lang } = {}) {
     const exe = executablePath || locateBrowser();
     if (!exe) {
       throw new AxError(Codes.LAUNCH_FAILED,
@@ -434,6 +436,27 @@ export class BrowserHandle {
       // include localhost for proxy testing.
       const bypass = proxyBypass ?? process.env.AXUSE_PROXY_BYPASS;
       if (bypass) args.push(`--proxy-bypass-list=${bypass}`);
+      // WebRTC leak fix (the classic mismatch detector): without this,
+      // STUN/srflx candidates still leave through the REAL interface —
+      // the page sees the proxy IP on HTTP and the datacenter IP on
+      // WebRTC in the same session. With the policy, WebRTC only uses
+      // proxied paths; mDNS-obfuscated host candidates remain, so the
+      // surface stays indistinguishable from a real Chrome behind a VPN.
+      args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+    }
+    // Quiet egress (server/proxied lanes): Chrome's own background traffic
+    // (component updates, metrics, domain reliability, phishing lookups,
+    // pings) does not belong to the persona — mute it. Browser-behavior
+    // flags only; nothing here is page-visible.
+    if (proxySpec || virtualDisplayStatus().active) {
+      args.push(
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-domain-reliability",
+        "--disable-client-side-phishing-detection",
+        "--disable-sync",
+        "--no-pings",
+      );
     }
     // Source-level posture fix (verified live, Chrome 151): with remote
     // debugging active, Chrome otherwise reports navigator.webdriver ===
@@ -447,10 +470,13 @@ export class BrowserHandle {
     // --lang alone does NOT — Chrome persists the OS-derived preference).
     // The Intl default locale follows the PROCESS locale env instead (also
     // measured: flags leave Intl at the OS locale) — derive LC_ALL/LANG so
-    // Intl, navigator.language and Accept-Language agree.
-    if (process.env.AXUSE_LANG && /^[\w,-]{2,32}$/.test(process.env.AXUSE_LANG)) {
-      args.push(`--accept-lang=${process.env.AXUSE_LANG}`);
-      const m = /^([a-z]{2,3})[-_]([A-Za-z]{2})$/.exec(process.env.AXUSE_LANG.trim());
+    // Intl, navigator.language and Accept-Language agree. PER-INSTANCE
+    // values (open {timezone, lang}) override the process env, so one
+    // process can host one coherent persona per proxy exit.
+    const personaLang = lang ?? process.env.AXUSE_LANG;
+    if (personaLang && /^[\w,-]{2,32}$/.test(personaLang)) {
+      args.push(`--accept-lang=${personaLang}`);
+      const m = /^([a-z]{2,3})[-_]([A-Za-z]{2})$/.exec(personaLang.trim());
       if (m) {
         localeTag = `${m[1]}_${m[2].toUpperCase()}.UTF-8`;
       }
@@ -478,10 +504,11 @@ export class BrowserHandle {
     // workers — set it on the child environment so it matches the egress
     // persona (a UTC server behind a US residential exit is a classic
     // timezone-mismatch score). LC_ALL/LANG make the Intl default locale
-    // match AXUSE_LANG (needs the locale generated on the host — doctor
-    // checks `locale -a`).
+    // match the persona language (needs the locale generated on the host —
+    // doctor checks `locale -a`). Per-instance values override the env.
+    const personaTz = timezone ?? process.env.AXUSE_TIMEZONE;
     const childEnv = { ...process.env };
-    if (process.env.AXUSE_TIMEZONE) childEnv.TZ = process.env.AXUSE_TIMEZONE;
+    if (personaTz) childEnv.TZ = personaTz;
     if (localeTag) {
       childEnv.LC_ALL = localeTag;
       childEnv.LANG = localeTag;
@@ -550,12 +577,25 @@ export class BrowserHandle {
     h.ephemeral = !persistent; // persistent (A2) profiles are never deleted on dispose
     h.launched = true;
     if (proxySpec?.username) h.proxyAuth = { username: proxySpec.username, password: proxySpec.password ?? "" };
+    // The persona this instance carries (facts for solver results + posture).
+    if (personaTz || personaLang) h.persona = { ...(personaTz ? { timezone: personaTz } : {}), ...(personaLang ? { lang: personaLang } : {}) };
     h.conn = new CdpConnection(wsUrl);
     try {
       await h.conn.connect();
     } catch (e) {
       await h.dispose();
       throw e;
+    }
+    // "Visible tabs, no orphan tabs" starts at launch: remember the
+    // browser's own startup page (chrome://newtab headed, about:blank
+    // headless — platform-dependent) so createTab can close it AFTER our
+    // first real tab exists. Closing it here, while it is the last page,
+    // could terminate the browser on some builds.
+    try {
+      const { targetInfos } = await h.conn.send("Target.getTargets", {});
+      h.startupPages = targetInfos.filter((ti) => ti.type === "page").map((ti) => ti.targetId);
+    } catch {
+      h.startupPages = [];
     }
     // Proxy credentials over CDP: we subscribe to Fetch.authRequired at the
     // CONNECTION level (one handler for every session) and answer Proxy
@@ -585,9 +625,26 @@ export class BrowserHandle {
     return h;
   }
 
+  /** Activate a tab (visible-tab guard; used only for attached browsers —
+   *  launched ones run with background throttling disabled). */
+  async bringToFront(sessionId) {
+    return this.conn.send("Page.bringToFront", {}, sessionId);
+  }
+
   async createTab(url = "about:blank", { autoAttach = true } = {}) {
     const { targetId } = await this.conn.send("Target.createTarget", { url });
-    return this.attachTab(targetId, { autoAttach });
+    const attached = await this.attachTab(targetId, { autoAttach });
+    // Now that OUR first tab exists, the browser's startup page(s) can go —
+    // every remaining page target is one axuse created and tracks (the
+    // "visible tabs, no orphan tabs" promise). Closing them EARLIER, while
+    // the startup page is the last page, could terminate the browser.
+    if (this.startupPages?.length) {
+      for (const t of this.startupPages) {
+        try { await this.conn.send("Target.closeTarget", { targetId: t }); } catch {}
+      }
+      this.startupPages = [];
+    }
+    return attached;
   }
 
   /** Attach to an existing page target (e.g. a popup / target=_blank tab). */

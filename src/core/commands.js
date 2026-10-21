@@ -15,7 +15,7 @@
 
 // Shared param specs: identical wording everywhere, and short — the tool
 // list rides along in the model's context on EVERY turn.
-const TAB = { t: "string", desc: "Tab id (default: active tab)." };
+const TAB = { t: "string", desc: "Tab id from ax_open. Required once more than one tab is controlled (tabs are shared by every caller of this server)." };
 const STATE = { t: "number", desc: "state_id the ref came from (rejects stale refs)." };
 const SETTLE = { t: "number", desc: "Settle ms before the diff (default 150)." };
 const TARGET = { t: "target", req: true, desc: '{ref:"e7"} from the latest observation, or {x,y} viewport CSS px = ax_screenshot pixels (last resort).' };
@@ -24,14 +24,14 @@ export const Contract = Object.freeze({
   open: {
     group: "browser",
     title: "Open a controlled browser tab",
-    desc: "Open a URL in a new tab (launches a browser on first use). Returns the FULL accessibility snapshot: one line per element, actionable ones with [ref=eN]. cdp_url attaches to a running Chrome; backend=extension drives the user's own Chrome via the axuse extension.",
+    desc: "Open a URL in a new tab. Backend default: the user's own signed-in Chrome when the axuse extension is connected, else a separate CDP-launched browser (the result says which). Returns the FULL accessibility snapshot: one line per element, actionable ones with [ref=eN]. cdp_url attaches to a running Chrome. Keep the returned tab_id and pass it on every later call.",
     params: {
       url: { t: "string", req: true, desc: "http(s), file, about, data or blob URL." },
       headless: { t: "boolean", desc: "No window (cdp backend). On a display-less Linux server axuse auto-boots a virtual display and stays headed (anti-bot-safe) — keep headless off for challenge pages; use it only for trusted internal pages." },
       proxy: { t: "string", desc: 'Route this browser through a proxy: "http://host:port", "socks5://user:pass@host:port" (per-launch, credentials answered over CDP; loopback bypassed by default; AXUSE_PROXY otherwise).' },
       proxy_bypass: { t: "string", desc: 'Chrome proxy bypass list (advanced), e.g. "<-loopback>" to include localhost.' },
       cdp_url: { t: "string", desc: 'Attach instead of launching, e.g. "http://127.0.0.1:9222".' },
-      backend: { t: "enum", values: ["cdp", "extension"], desc: "cdp (default) or extension." },
+      backend: { t: "enum", values: ["cdp", "extension"], desc: "Omit for auto (extension when connected, else cdp; AXUSE_BACKEND pins it). cdp = separate, not-signed-in browser." },
       executable_path: { t: "string", desc: "Browser binary (default: auto-detect)." },
       profile_dir: { t: "string", desc: "Persistent user-data-dir to reuse an aged profile (e.g. a session-vault profile). A persistent profile is never deleted on close." },
       settle_ms: { t: "number", desc: "Settle ms before observing (default 300)." },
@@ -47,7 +47,7 @@ export const Contract = Object.freeze({
       urls: { t: "urls", req: true, desc: "Non-empty list of http(s), file, about, data or blob URLs (maximum 100)." },
       headless: { t: "boolean", desc: "No window (cdp backend; display-less Linux servers auto-boot a virtual display instead)." },
       cdp_url: { t: "string", desc: 'Attach instead of launching, e.g. "http://127.0.0.1:9222".' },
-      backend: { t: "enum", values: ["cdp", "extension"], desc: "cdp (default) or extension." },
+      backend: { t: "enum", values: ["cdp", "extension"], desc: "Omit for auto (extension when connected, else cdp; AXUSE_BACKEND pins it). cdp = separate, not-signed-in browser." },
       executable_path: { t: "string", desc: "Browser binary (default: auto-detect)." },
       settle_ms: { t: "number", desc: "Settle ms per URL (default 300)." },
       close_after: { t: "boolean", desc: "Close each axuse-created tab after observing it (default true)." },
@@ -83,13 +83,13 @@ export const Contract = Object.freeze({
   observe: {
     group: "browser",
     title: "Observe a tab (accessibility snapshot; diff by default)",
-    desc: "Accessibility snapshot. mode=diff (default): only what changed since the last observation (unchanged refs stay valid); mode=full: whole page. find=\"text\": only matching lines (+context, refs) from the whole page — cheapest way to locate a row/item on big pages. Actions already return a diff, so you rarely need this.",
+    desc: "Accessibility snapshot. mode=diff (default): only what changed since the last observation (unchanged refs stay valid); mode=full: whole page. find=\"text\": only matching lines (+context, refs) from the whole page — cheapest way to locate a row/item on big pages. mode=text: the page's full readable text (no refs) for long articles that a snapshot truncates. Actions already return a diff, so you rarely need this.",
     params: {
       tab_id: TAB,
-      mode: { t: "enum", values: ["diff", "full"], desc: "diff (default) or full." },
+      mode: { t: "enum", values: ["diff", "full", "text"], desc: "diff (default), full, or text (readable text only)." },
       find: { t: "string", desc: "Return only lines containing this text (case-insensitive)." },
       max_nodes: { t: "number", desc: "Element budget (default 300, max 2000)." },
-      max_chars: { t: "number", desc: "Char budget (default 24000, max 200000)." },
+      max_chars: { t: "number", desc: "Char budget (default 24000; text mode 100000; max 200000)." },
     },
     observed: "none",
   },

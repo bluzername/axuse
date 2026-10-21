@@ -39,3 +39,4 @@ bench/suite/browser-use-SKILL.md
 vaults/
 captures/
 plugins/licenses/
+*.bdic

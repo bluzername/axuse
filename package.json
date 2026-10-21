@@ -11,7 +11,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test --test-timeout=90000 test/*.test.js",
+    "test": "node --import ./test/setup.js --test --test-timeout=90000 test/*.test.js",
     "doctor": "node src/cli.js doctor"
   },
   "keywords": [

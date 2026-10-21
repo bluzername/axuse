@@ -16,7 +16,8 @@ import { renderResult } from "./render.js";
 // version is SKILL.md). Harnesses surface this to the model once.
 const INSTRUCTIONS = [
   "axuse: browser control via accessibility snapshots with element refs ([ref=e7]).",
-  "Workflow: ax_open → act on refs → read the diff each action returns (no need to re-observe).",
+  "Workflow: ax_open → act on refs → read the diff each action returns (no need to re-observe). Pass the tab_id ax_open returned on every call: tabs are shared by all callers of this server, and tab_id is required once more than one tab is open.",
+  "Backend: ax_open defaults to the user's own signed-in Chrome when the axuse extension is connected (else a separate CDP-launched browser); the result reports backend.",
   "For bounded source lists, use ax_open_many {urls:[...]} for compact title/status/excerpt results; it closes temporary tabs by default.",
   "Forms: ONE ax_fill call with all fields (+submit). Big pages: ax_observe {find:\"text\"}. Infinite feeds/lazy lists: ax_scroll {until:\"text\"}.",
   "New tabs/popups and JS dialogs opened by an action are reported in its result (answer dialogs with ax_dialog).",
