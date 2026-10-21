@@ -177,6 +177,13 @@ spec = one browser instance (different specs never share a launch).
 Combine with `AXUSE_TIMEZONE`/`AXUSE_LANG` so the whole persona — IP,
 clock, languages — is coherent per instance.
 
+Every `ax_solve_captcha` / `axuse solve` result carries **posture facts**
+(`headed-on-virtual-display` / `headed` / `headless`, plus the virtual
+display and the credentials-stripped egress endpoint) — and a loud warning
+when the browser was headless, since challenge pages detect that shape
+first. Agents and operators see exactly which browser shape fought the
+challenge.
+
 Note: a plugin that re-enables CDP `Fetch` with its own interception
 patterns takes over interception for that session and may drop the proxy
 auth subscription for those requests (documented integration seam).
@@ -202,18 +209,40 @@ a "consumer" session, a fleet where every account shows the exact same
 ```bash
 AXUSE_TIMEZONE=America/New_York      # Date/Intl in pages AND workers (TZ)
 AXUSE_LANG=en-GB                     # navigator.language(s) + Accept-Language
+                                     #   + Intl default locale (LC_ALL — see below)
 AXUSE_DISPLAY_SIZE=random            # stable geometry per machine, fleet spread
 AXUSE_FP_CORES=8                     # optional persona cap for big servers
 AXUSE_FP_MEMORY=8                    # optional; only where the API exists
 ```
 
+`AXUSE_LANG` mechanics (measured live, Chrome 151): `--accept-lang` drives
+`navigator.language`/`languages` and the `Accept-Language` header — but the
+**Intl default locale follows the process locale env, not any Chrome flag**
+(`--lang` alone changes neither). axuse therefore derives `LC_ALL`/`LANG`
+(`en-GB` → `en_GB.UTF-8`) for the browser process so Intl, navigator and
+headers all agree. The locale must be **generated on the host** or Intl
+silently falls back: `sudo locale-gen en_GB.UTF-8 && sudo update-locale` —
+`doctor` checks `locale -a` and tells you exactly this.
+
 `--disable-blink-features=AutomationControlled` is passed on every launch
 (verified live on Chrome 151): with remote debugging active, Chrome reports
 `navigator.webdriver === true` in **every context** — main frames and
 cross-origin iframes — a fingerprint the *harness itself* creates, present
-on no human-driven Chrome. The flag turns it off **at the source**; a
-pre-document script is the fallback for builds that ignore the flag
-(`AXUSE_NEUTRALIZE_WEBDRIVER=0` opts out of the fallback).
+on no human-driven Chrome. The flag turns it off **at the source**.
+
+**Tamper-visibility discipline** (the subtle part): replacing Chrome's
+native getter — even with one returning the same value — changes the
+prototype descriptor into JS source a page can read (the classic
+`getter.toString().includes("[native code]")` check; we measured ourselves
+guilty of this before fixing it). So the pre-document script patches
+`webdriver` **only when the flag did not already fix it** (`if
+(navigator.webdriver !== false)`), and its fallback/persona-cap getters are
+toString-masked to present native source at the descriptor level. On
+flag-working builds the script touches nothing at all. Honest limit: a
+`Function.prototype.toString.call(getter)` bypass can still see through a
+masked fallback getter — this is why the source-level flag, not the script,
+is the primary mechanism (`AXUSE_NEUTRALIZE_WEBDRIVER=0` removes the
+fallback entirely).
 
 Everything is measured and printed by `doctor` (posture + persona lines in
 the smoke test), and asserted by `test/server-mode.test.js`.
@@ -248,9 +277,12 @@ the smoke test), and asserted by `test/server-mode.test.js`.
   flag (a pre-document script as fallback): modern Chrome sets it to `true`
   merely because a DevTools client is attached — a fingerprint of *our own
   plumbing*, present on no human-driven Chrome. axuse restores the exact
-  value a human browser reports (`false`), in every frame. It does not
-  fake, answer or shortcut any challenge — solvers still click real
-  widgets with trusted input. Opt out: `AXUSE_NEUTRALIZE_WEBDRIVER=0`.
+  value a human browser reports (`false`), in every frame — and the script
+  touches nothing on builds where the flag already fixed it (tamper-
+  visibility is asserted by live tests: the prototype getter stays
+  **native**). It does not fake, answer or shortcut any challenge — solvers
+  still click real widgets with trusted input. Opt out:
+  `AXUSE_NEUTRALIZE_WEBDRIVER=0`.
 - **No invented hardware.** The WebGL renderer string stays the honest
   one (SwiftShader/ANGLE software — what every GPU-less Linux desktop
   reports too); `hardwareConcurrency`/`deviceMemory` stay honest unless the

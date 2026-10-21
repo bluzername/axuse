@@ -10,7 +10,7 @@
  *   axuse help
  */
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { locateBrowser } from "./core/cdp.js";
@@ -257,6 +257,13 @@ async function solveCmd() {
     if (numberArg("--deadline-ms")) opts.deadlineMs = numberArg("--deadline-ms");
     const ctx = buildSolveContext(controller);
     result = await solveWith(solvers, provider, ctx, opts);
+    // Posture facts ride along (see ax_solve_captcha): which browser shape
+    // fought the challenge, with the loud warning when it was headless.
+    const posture = controller.browserPosture();
+    result = { ...result, posture };
+    if (posture.posture === "headless") {
+      result.warning = "the browser is headless — challenge/anti-bot pages detect --headless first; rerun without --headless (on a display-less host, axuse server mode keeps Chrome headed)";
+    }
   } finally {
     await Promise.race([controller.dispose(), new Promise((ok) => setTimeout(ok, 5000))]);
   }
@@ -352,7 +359,19 @@ async function doctor() {
       out(`persona: timezone not overridden (Chrome uses this host's TZ, currently ${new Intl.DateTimeFormat().resolvedOptions().timeZone}) — set AXUSE_TIMEZONE to the egress persona's zone when routing through a proxy`);
     }
     if (process.env.AXUSE_LANG) {
-      out(`AXUSE_LANG=${process.env.AXUSE_LANG}: drives --lang (navigator.language(s) + Accept-Language)`);
+      const langLine = `AXUSE_LANG=${process.env.AXUSE_LANG}: drives --accept-lang (navigator.language(s) + Accept-Language) and LC_ALL (Intl default locale — measured: Chrome flags alone leave Intl at the OS locale)`;
+      const m = /^([a-z]{2,3})[-_]([A-Za-z]{2})$/.exec(String(process.env.AXUSE_LANG).trim());
+      if (m) {
+        const tag = `${m[1]}_${m[2].toUpperCase()}`;
+        const locales = (() => {
+          try { return String(spawnSync("locale", ["-a"], { timeout: 4000 }).stdout ?? ""); } catch { return ""; }
+        })();
+        const generated = new RegExp(`${tag}\\.(utf8|UTF-8)`, "i").test(locales);
+        out(`${langLine}`);
+        out(`locale ${tag}.UTF-8: ${generated ? "generated — Intl resolves coherently" : `NOT generated — Intl silently falls back to the OS locale: sudo locale-gen ${tag}.UTF-8 && sudo update-locale, then restart the MCP server`}`);
+      } else {
+        out(`${langLine}`);
+      }
     }
     if (process.env.AXUSE_FP_CORES || process.env.AXUSE_FP_MEMORY) {
       out(`persona overrides active: hardwareConcurrency=${process.env.AXUSE_FP_CORES ?? "(honest)"} · deviceMemory=${process.env.AXUSE_FP_MEMORY ?? "(honest)"} — a big server's honest cores are a persona mismatch for residential-looking traffic`);

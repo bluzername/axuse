@@ -140,7 +140,15 @@ export async function createServer({ controller = new Controller(), desktop, sol
       }
       const ctx = buildSolveContext(controller);
       const result = await solveWith(registry, args.provider, ctx, opts);
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      // Posture facts ride along on every solve: the agent can see (and the
+      // operator audit) which browser shape fought the challenge — and a
+      // headless shape gets the loud warning it deserves.
+      const posture = controller.browserPosture();
+      const payload = { ...result, posture };
+      if (posture.posture === "headless") {
+        payload.warning = "the browser is headless — challenge/anti-bot pages detect --headless first; close this browser (ax_close {browser:true}) and reopen WITHOUT headless (on a display-less host, axuse server mode keeps Chrome headed)";
+      }
+      return { content: [{ type: "text", text: JSON.stringify(payload) }] };
     }
     if (tool._group === "plugin") {
       // A1 dispatch: the plugin tool's validated handle(args, ctx) — the

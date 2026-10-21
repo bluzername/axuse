@@ -134,17 +134,25 @@ test("server mode: IANA timezone validation (the same engine Chrome uses)", () =
   assert.equal(validTimezone(null), null);
 });
 
-test("server mode: posture script — webdriver fallback plus opt-in persona overrides", () => {
+test("server mode: posture script — conditional, tamper-invisible, opt-in persona overrides", () => {
   const base = postureScript({});
-  assert.match(base, /navigator\.webdriver/);
+  // The guard: on builds where the AutomationControlled flag already returns
+  // false, the script must touch NOTHING (replacing a native getter with JS
+  // source is itself detectable — measured live).
+  assert.match(base, /if \(navigator\.webdriver !== false\)/, "patches only when the flag did not fix it");
+  // The mask: fallback getters present native source at the descriptor level.
+  assert.match(base, /\[native code\]/);
   assert.doesNotMatch(base, /hardwareConcurrency/, "honest cores stay the default");
   assert.doesNotMatch(base, /deviceMemory/, "honest memory stays the default");
   const cores = postureScript({ AXUSE_FP_CORES: "8" });
-  assert.match(cores, /hardwareConcurrency[^]+=> 8/);
+  assert.match(cores, /return 8;/, "cores override present");
+  assert.match(cores, /get hardwareConcurrency\(\) \{ \[native code\] \}/, "cores override is masked");
   assert.doesNotMatch(cores, /deviceMemory/);
-  // deviceMemory lands in Chrome's 0.25/0.5/1/2/4/8 buckets (16 GB input → 8).
-  const mem = postureScript({ AXUSE_FP_MEMORY: "3" });
-  assert.match(mem, /'deviceMemory' in navigator[^]+=> 2/);
+  // deviceMemory lands in Chrome's 0.25/0.5/1/2/4/8 buckets (16 GB input → 8),
+  // and only where the platform exposes the API.
+  const mem = postureScript({ AXUSE_FP_MEMORY: "16" });
+  assert.match(mem, /'deviceMemory' in navigator[^]+return 8;/);
+  assert.match(postureScript({ AXUSE_FP_MEMORY: "3" }), /return 2;/);
   // Garbage values are ignored, never a broken page.
   const junk = postureScript({ AXUSE_FP_CORES: "zero", AXUSE_FP_MEMORY: "-1" });
   assert.doesNotMatch(junk, /hardwareConcurrency/);
@@ -244,6 +252,14 @@ test("server mode: headed Chrome auto-boots a virtual display (anti-bot posture)
   })).value ?? "{}");
   assert.doesNotMatch(ua, /headless/i);
   assert.equal(fp.webdriver, false);
+  // Tamper-invisibility (measured regression): with the AutomationControlled
+  // flag working, the prototype getter must be Chrome's NATIVE one — the
+  // posture script touches nothing when the flag already fixed the value.
+  const desc = JSON.parse((await c.execute("evaluate", {
+    expression: `(() => { const d = Object.getOwnPropertyDescriptor(Navigator.prototype, "webdriver") || {}; return { src: String(d.get ?? ""), native: String(d.get ?? "").includes("[native code]"), value: navigator.webdriver }; })()`,
+  })).value ?? "{}");
+  assert.equal(desc.value, false);
+  assert.equal(desc.native, true, `getter must stay native — got: ${desc.src}`);
   assert.ok(fp.w >= geo.w - 80, `viewport width ${fp.w} ≈ ${geo.w} (--window-size honored)`);
   assert.equal(fp.webgl, true, "WebGL present (SwiftShader) — a signal anti-bot checks");
 
@@ -281,16 +297,20 @@ test("server mode: persona coherence — TZ, language and core/memory overrides 
     expression: `(() => {
       const g = document.createElement('canvas').getContext('webgl');
       const dbg = g && g.getExtension('WEBGL_debug_renderer_info');
-      return { tz: Intl.DateTimeFormat().resolvedOptions().timeZone, lang: navigator.language,
-        langs: navigator.languages && navigator.languages[0], cores: navigator.hardwareConcurrency,
-        mem: navigator.deviceMemory, webdriver: navigator.webdriver,
+      return { tz: Intl.DateTimeFormat().resolvedOptions().timeZone, intl: Intl.DateTimeFormat().resolvedOptions().locale,
+        lang: navigator.language, langs: navigator.languages && navigator.languages[0],
+        cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory, webdriver: navigator.webdriver,
         renderer: dbg ? g.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : null, webgl: !!g };
     })()`,
   })).value ?? "{}");
   // TZ reaches Date/Intl in the page (matches the egress persona).
   assert.equal(p.tz, "Europe/Amsterdam");
-  // --lang drives navigator.language AND the Accept-Language header source.
+  // --accept-lang drives navigator.language AND the Accept-Language header
+  // source; the derived LC_ALL makes the Intl default locale agree (this
+  // host generates en_GB.utf8 — the doctor checks and warns when a host
+  // does not).
   assert.equal(p.lang, "en-GB");
+  assert.match(p.intl, /^en[-_]GB/, `Intl default locale follows AXUSE_LANG (got ${p.intl})`);
   // Persona overrides land (opt-in caps for high-core servers). deviceMemory
   // only exists on platforms that expose the API (this Linux build does not)
   // — the override applies exactly there, never inventing an API surface

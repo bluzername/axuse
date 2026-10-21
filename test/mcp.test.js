@@ -77,6 +77,10 @@ test("mcp: handshake, tools/list, tools/call end-to-end", { skip: !hasBrowser },
   const desktopExpected = process.platform === "win32"
     || (process.platform === "darwin" && process.env.AXUSE_ENABLE_MACOS_CUA === "1")
     || linuxDesktopOk;
+  // The AX-structure tools mount ONLY with a structure-first driver
+  // (macOS System Events; Linux AT-SPI). Windows (coordinate driver) must
+  // not advertise them.
+  const axExpected = (process.platform === "darwin" && process.env.AXUSE_ENABLE_MACOS_CUA === "1") || linuxAtspiOk;
 
   // NOTE on stability: this process probes X liveness AND the spawned
   // server probes it independently at startup. Under full-suite parallel
@@ -98,10 +102,16 @@ test("mcp: handshake, tools/list, tools/call end-to-end", { skip: !hasBrowser },
   };
   let { srv, names } = await boot();
   t.after(async () => { await srv.end(); });
-  if (!!names.includes("ax_desktop_screenshot") !== desktopExpected && process.platform === "linux" && process.env.DISPLAY) {
-    await srv.end();
-    ({ srv, names } = await boot());
-    t.after(async () => { await srv.end(); });
+  // Disagreement on EITHER dimension (desktop mount, AX-layer mount) → one
+  // respawn, then the assertion below is final.
+  if (process.platform === "linux" && process.env.DISPLAY) {
+    const disagrees = (desktopExpected !== names.includes("ax_desktop_screenshot"))
+      || (!!axExpected !== names.includes("ax_desktop_ax_snapshot"));
+    if (disagrees) {
+      await srv.end();
+      ({ srv, names } = await boot());
+      t.after(async () => { await srv.end(); });
+    }
   }
 
   assert.ok(names.includes("ax_open"));
@@ -114,10 +124,6 @@ test("mcp: handshake, tools/list, tools/call end-to-end", { skip: !hasBrowser },
   } else {
     assert.ok(!names.includes("ax_desktop_screenshot"));
   }
-  // The AX-structure tools mount ONLY with a structure-first driver
-  // (macOS System Events; Linux AT-SPI). Windows (coordinate driver) must
-  // not advertise them.
-  const axExpected = (process.platform === "darwin" && process.env.AXUSE_ENABLE_MACOS_CUA === "1") || linuxAtspiOk;
   if (axExpected) {
     for (const t of ["ax_desktop_ax_snapshot", "ax_desktop_ax_click", "ax_desktop_ax_set", "ax_desktop_ax_read"]) {
       assert.ok(names.includes(t), `${t} mounted with the structure-first driver`);

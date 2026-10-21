@@ -17,26 +17,36 @@ import { ensureVirtualDisplay, needsNoSandbox, serverModePlan, virtualDisplaySta
 
 const SEND_TIMEOUT_MS = 30_000;
 
-/** The pre-document posture script: restores values a human-driven Chrome
- *  reports but a CDP-driven one does not. `--disable-blink-features=
- *  AutomationControlled` already fixes navigator.webdriver at the SOURCE
- *  (all contexts — main frames, cross-origin iframes); this script is the
- *  belt-and-suspenders fallback for builds where the flag is not honored.
- *  Optional persona overrides (AXUSE_FP_CORES / AXUSE_FP_MEMORY): a
- *  96-core server's honest hardwareConcurrency is a persona mismatch for a
- *  residential-looking session — the operator may cap it. Opt-in, honest
- *  hardware stays the default. Exported for tests. */
+/** The pre-document posture script.
+ *
+ *  Tamper-visibility discipline (measured live, Chrome 151): replacing
+ *  Chrome's NATIVE getter — even with one returning the same value —
+ *  changes `Object.getOwnPropertyDescriptor(...).get` into JS source the
+ *  page can read (`"[native code]"` check). So:
+ *   - webdriver is patched ONLY when the AutomationControlled launch flag
+ *     did not already fix it (`navigator.webdriver !== false`); on
+ *     flag-working builds the script touches nothing at all;
+ *   - fallback and persona-cap getters are toString-masked to look native
+ *     at the descriptor level (the level pages actually check;
+ *     `Function.prototype.toString.call` bypassing remains theoretically
+ *     detectable — stated honestly in docs/server-mode.md).
+ *  Persona caps (AXUSE_FP_CORES / AXUSE_FP_MEMORY) are opt-in: a 96-core
+ *  server's honest hardwareConcurrency is a persona mismatch for a
+ *  residential-looking session — the operator may cap it. */
 export function postureScript(env = process.env) {
+  const maskedGetter = (name, expr) => `(function () {
+      var g = function () { return ${expr}; };
+      try { Object.defineProperty(g, "toString", { value: function toString() { return "function get ${name}() { [native code] }"; } }); } catch (e) {}
+      try { Object.defineProperty(navigator, "${name}", { get: g, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(Navigator.prototype, "${name}", { get: g, configurable: true }); } catch (e) {}
+    })()`;
   const parts = [
-    "try { delete navigator.webdriver; } catch {}",
-    "Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true });",
+    // webdriver: patch ONLY on builds where the flag did not fix it.
+    `try { if (navigator.webdriver !== false) { ${maskedGetter("webdriver", "false")} } } catch (e) {}`,
   ];
   const cores = Number(env.AXUSE_FP_CORES);
   if (Number.isFinite(cores) && cores > 0 && Number.isInteger(cores)) {
-    parts.push(
-      `try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ${cores}, configurable: true }); } catch {}`,
-      `try { Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => ${cores}, configurable: true }); } catch {}`,
-    );
+    parts.push(`try { ${maskedGetter("hardwareConcurrency", String(cores))} } catch (e) {}`);
   }
   const mem = Number(env.AXUSE_FP_MEMORY);
   if (Number.isFinite(mem) && mem > 0) {
@@ -46,9 +56,7 @@ export function postureScript(env = process.env) {
     // honest: creating it on a platform that lacks it would be a stronger
     // deviation than the value it replaces.
     const bucket = [0.25, 0.5, 1, 2, 4, 8].reduce((a, b) => (mem >= b ? b : a), 0.25);
-    parts.push(
-      `if ('deviceMemory' in navigator) { try { Object.defineProperty(navigator, 'deviceMemory', { get: () => ${bucket}, configurable: true }); } catch {} }`,
-    );
+    parts.push(`if ('deviceMemory' in navigator) { try { ${maskedGetter("deviceMemory", String(bucket))} } catch (e) {} }`);
   }
   return parts.join("\n");
 }
@@ -380,6 +388,7 @@ export class BrowserHandle {
     // up. The default accommodates that; AXUSE_LAUNCH_TIMEOUT_MS overrides.
     const launchTimeoutMs = Number(process.env.AXUSE_LAUNCH_TIMEOUT_MS ?? 30_000);
     const persistent = typeof userDataDir === "string" && userDataDir.trim().length > 0;
+    let localeTag = null; // "en_GB.UTF-8"-style tag derived from AXUSE_LANG
     const profileRoot = profileRootOverride || process.env.AXUSE_PROFILE_DIR || tmpdir();
     try { mkdirSync(profileRoot, { recursive: true }); } catch {}
     sweepStaleProfiles(profileRoot);
@@ -430,8 +439,15 @@ export class BrowserHandle {
     // Persona coherence: --accept-lang drives navigator.language AND
     // navigator.languages AND the Accept-Language header (verified live:
     // --lang alone does NOT — Chrome persists the OS-derived preference).
+    // The Intl default locale follows the PROCESS locale env instead (also
+    // measured: flags leave Intl at the OS locale) — derive LC_ALL/LANG so
+    // Intl, navigator.language and Accept-Language agree.
     if (process.env.AXUSE_LANG && /^[\w,-]{2,32}$/.test(process.env.AXUSE_LANG)) {
       args.push(`--accept-lang=${process.env.AXUSE_LANG}`);
+      const m = /^([a-z]{2,3})[-_]([A-Za-z]{2})$/.exec(process.env.AXUSE_LANG.trim());
+      if (m) {
+        localeTag = `${m[1]}_${m[2].toUpperCase()}.UTF-8`;
+      }
     }
     const vd = virtualDisplayStatus();
     if (vd.active) {
@@ -455,9 +471,15 @@ export class BrowserHandle {
     // Persona coherence (opt-in): TZ drives Date/Intl in the page AND in
     // workers — set it on the child environment so it matches the egress
     // persona (a UTC server behind a US residential exit is a classic
-    // timezone-mismatch score).
+    // timezone-mismatch score). LC_ALL/LANG make the Intl default locale
+    // match AXUSE_LANG (needs the locale generated on the host — doctor
+    // checks `locale -a`).
     const childEnv = { ...process.env };
     if (process.env.AXUSE_TIMEZONE) childEnv.TZ = process.env.AXUSE_TIMEZONE;
+    if (localeTag) {
+      childEnv.LC_ALL = localeTag;
+      childEnv.LANG = localeTag;
+    }
     const proc = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: false, env: childEnv });
     let wsUrl;
     try {

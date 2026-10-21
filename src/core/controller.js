@@ -9,7 +9,7 @@
  * cursors, snapshots for diffing) lives in this process.
  */
 
-import { BrowserHandle } from "./cdp.js";
+import { BrowserHandle, parseProxySpec } from "./cdp.js";
 import { Contract, validate } from "./commands.js";
 import { AxError, Codes } from "./errors.js";
 import { serializeExpression } from "./serialize.js";
@@ -454,6 +454,28 @@ export class Controller {
     }
   }
 
+  /** The active browser's launch posture — the facts solver results carry
+   *  so agents (and operators) can see headless vs headed vs the server-mode
+   *  virtual display, and get warned when they are about to fight a
+   *  challenge page from a detected browser shape. */
+  browserPosture() {
+    let rec = null;
+    if (this.activeTabId && this.tabs.has(this.activeTabId)) {
+      rec = this.browsers.get(this.tabs.get(this.activeTabId).browserId) ?? null;
+    }
+    if (!rec || !rec.handle) {
+      rec = [...this.browsers.values()].find((b) => b.handle && !b.handle.conn.closed) ?? null;
+    }
+    if (!rec) return { posture: "no-browser" };
+    const vd = virtualDisplayStatus();
+    const headless = String(rec.key).startsWith("launch:headless");
+    return {
+      posture: headless ? "headless" : (vd.active ? "headed-on-virtual-display" : "headed"),
+      ...(vd.active ? { display: vd.display } : {}),
+      ...(rec.egress ? { egress: rec.egress } : {}),
+    };
+  }
+
   async ensureBrowser({ headless, cdpUrl, executablePath, backend, profileDir, proxy, proxyBypass }) {
     // Extension backend: the user's real Chrome through the axuse bridge
     // (Codex pattern: one browser, the user's own, tabs visible to them).
@@ -489,6 +511,12 @@ export class Controller {
       : await BrowserHandle.launch({ headless, executablePath, userDataDir: profileDir, proxy, proxyBypass });
     const browserId = `b${++this.browserSeq}`;
     const rec = { browserId, handle, tabs: new Set(), key };
+    // Egress fact for solver results (parseProxySpec strips credentials —
+    // only the scheme://host:port ever surfaces).
+    // Egress fact for solver results (parseProxySpec strips credentials —
+    // only the scheme://host:port ever surfaces).
+    const egressSpec = parseProxySpec(proxy ?? process.env.AXUSE_PROXY ?? "");
+    if (egressSpec) rec.egress = egressSpec.server;
     this.browsers.set(browserId, rec);
     this.browserIndex.set(key, browserId);
     await this.watchPopups(rec);
