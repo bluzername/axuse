@@ -27,7 +27,7 @@ export const Contract = Object.freeze({
     desc: "Open a URL in a new tab (launches a browser on first use). Returns the FULL accessibility snapshot: one line per element, actionable ones with [ref=eN]. cdp_url attaches to a running Chrome; backend=extension drives the user's own Chrome via the axuse extension.",
     params: {
       url: { t: "string", req: true, desc: "http(s), file, about, data or blob URL." },
-      headless: { t: "boolean", desc: "No window (cdp backend)." },
+      headless: { t: "boolean", desc: "No window (cdp backend). On a display-less Linux server axuse auto-boots a virtual display and stays headed (anti-bot-safe) — keep headless off for challenge pages; use it only for trusted internal pages." },
       cdp_url: { t: "string", desc: 'Attach instead of launching, e.g. "http://127.0.0.1:9222".' },
       backend: { t: "enum", values: ["cdp", "extension"], desc: "cdp (default) or extension." },
       executable_path: { t: "string", desc: "Browser binary (default: auto-detect)." },
@@ -43,7 +43,7 @@ export const Contract = Object.freeze({
     desc: "Open a bounded list of URLs sequentially and return compact page results. Tabs are closed after each URL by default, so this is safe for source lists and batch inspection. Use ax_open for interactive work on one page.",
     params: {
       urls: { t: "urls", req: true, desc: "Non-empty list of http(s), file, about, data or blob URLs (maximum 100)." },
-      headless: { t: "boolean", desc: "No window (cdp backend)." },
+      headless: { t: "boolean", desc: "No window (cdp backend; display-less Linux servers auto-boot a virtual display instead)." },
       cdp_url: { t: "string", desc: 'Attach instead of launching, e.g. "http://127.0.0.1:9222".' },
       backend: { t: "enum", values: ["cdp", "extension"], desc: "cdp (default) or extension." },
       executable_path: { t: "string", desc: "Browser binary (default: auto-detect)." },

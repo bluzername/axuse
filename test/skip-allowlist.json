@@ -4,6 +4,7 @@
     "desktop driver: screen_info reports a usable native coordinate space": "platform-or-gate: Windows live driver, or macOS with AXUSE_TEST_MACOS_DESKTOP=1",
     "desktop driver: budgeted screenshot of a small region": "platform-windows: Windows-only live screenshot",
     "linux desktop: driver drives a private Xvfb (input, capture, windows)": "platform-linux-xvfb: spawns a private Xvfb (sudo apt install xvfb); never touches the operator session",
+    "server mode: ": "platform-linux-xvfb: the display-less Linux lane (sudo apt install xvfb + a browser); live tests force a dead DISPLAY and boot a private Xvfb — hermetic, never touches the operator session",
     "linux desktop: JPEG decodes in an independent decoder when PIL exists": "platform-linux-xvfb: spawns a private Xvfb; PIL verified when present",
     "atspi: snapshot + read round-trip on a live app (read-only)": "platform-linux-atspi: needs the session's at-spi2 registry (DBUS_SESSION_BUS_ADDRESS); bare Xvfb/CI has none — read-only, never acts",
     "atspi: action sandbox — snapshot, ax_set, ax_click on a private bus+Xvfb+GTK app": "platform-linux-gtk-sandbox: needs Xvfb + dbus-run-session + python3-gi Gtk3 (CI installs them); fully isolated private bus",

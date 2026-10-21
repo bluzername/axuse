@@ -22,18 +22,28 @@ const INSTRUCTIONS = [
   "New tabs/popups and JS dialogs opened by an action are reported in its result (answer dialogs with ax_dialog).",
   "Screenshots only for pixels (canvas): then click {x,y} page coords.",
   "When a verification widget (Turnstile/reCAPTCHA/hCaptcha/slider/interstitial) blocks a page you were asked to drive, call ax_solve_captcha {provider} or ax_challenge {op:\"solve\"} instead of abandoning the task; report the returned facts verbatim (LICENSE_INVALID / NO_SOLVER are expected outcomes the operator can act on).",
+  "Servers: on a display-less host axuse auto-boots a virtual display and keeps Chrome fully headed (anti-bot-safe) — never pass headless for challenge/anti-bot pages; the ax_open result reports the virtual display fact.",
   "Capability plugins contribute extra tools (ax_vault, ax_net, ax_guard, ax_extract, …): ax_plugins lists them with their tool names.",
 ].join("\n");
 import { AxError } from "../core/errors.js";
 import { browserTools, desktopTools, solverTools, pluginTools } from "./manifest.js";
 import { resolveDesktopDriver, desktopUnavailable } from "../desktop/index.js";
 import { loadSolvers, buildSolveContext, solveWith, pluginDirs } from "../plugins/index.js";
+import { displayUsable, ensureVirtualDisplay, serverModeEnabled } from "../core/vdisplay.js";
 
 const VERSION = "0.1.0";
 const SUPPORTED_PROTOCOL = "2025-03-26";
 
 /** `desktop` resolves once (the macOS driver is the one async case). */
 export async function createServer({ controller = new Controller(), desktop, solvers } = {}) {
+  // Server mode (display-less Linux host): boot the virtual display EAGERLY,
+  // before the desktop driver resolves, so the tool surface is complete and
+  // correct from the first tools/list — ax_desktop_* mounts over the same
+  // Xvfb the browser launches on. Typed boot failures (no Xvfb installed)
+  // stay silent here and surface with full context at the first ax_open.
+  if (process.platform === "linux" && serverModeEnabled() && !displayUsable()) {
+    await ensureVirtualDisplay().catch(() => {});
+  }
   const driver = desktop !== undefined ? desktop : await resolveDesktopDriver().catch(() => null);
   // Solver plugins (paid add-ons) load once at server start: one import per
   // plugin dir, typed failures collected for ax_plugins — never fatal.

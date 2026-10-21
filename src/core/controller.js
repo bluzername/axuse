@@ -15,6 +15,7 @@ import { AxError, Codes } from "./errors.js";
 import { serializeExpression } from "./serialize.js";
 import { diffSnapshots, noChangeText } from "./diff.js";
 import { captureScreenshot, DEFAULT_BUDGET_BYTES } from "./screenshot.js";
+import { virtualDisplayStatus } from "./vdisplay.js";
 import {
   click as doClick, hover as doHover, drag as doDrag, wheel as doWheel,
   insertText, pressCombo, platformShortcut, selectAllCombo,
@@ -294,7 +295,13 @@ export class Controller {
     const tabId = tab.tabId;
     await this.navigateInTab(tab, url, a.settle_ms ?? 300);
     const observation = await this.observation(tab, { mode: "full" });
-    return { browser_id: browser.browserId, tab_id: tabId, observation, dialog: tab.dialog ?? null };
+    // Server-mode fact: headed Chrome on an auto-booted virtual display —
+    // the anti-bot-safe lane on display-less hosts (never --headless).
+    const vd = virtualDisplayStatus();
+    return {
+      browser_id: browser.browserId, tab_id: tabId, observation, dialog: tab.dialog ?? null,
+      ...(vd.active ? { display: { id: vd.display, virtual: true, width: vd.width, height: vd.height } } : {}),
+    };
   }
 
   /** Open a bounded source list without forcing the caller to write an MCP

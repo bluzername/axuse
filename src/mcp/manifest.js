@@ -260,7 +260,7 @@ export function solverTools(loaded) {
             description: 'Provider slug, e.g. "turnstile", "recaptcha-v2", "hcaptcha" (from loaded solver plugins).',
           },
           url: { type: "string", description: "Open this URL in a new tab first (else solve on the active tab)." },
-          headless: { type: "boolean", description: "Launch headless when url is given (default headed)." },
+          headless: { type: "boolean", description: "Launch headless when url is given (default headed — keep it: challenge pages detect headless; on display-less servers axuse auto-boots a virtual display so headed works anyway)." },
           max_attempts: { type: "number", description: "Solver retry budget (plugin-specific default)." },
           deadline_ms: { type: "number", description: "Overall deadline in ms (plugin-specific default)." },
         },

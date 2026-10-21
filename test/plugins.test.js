@@ -44,7 +44,7 @@ const CATALOG = [
 test("catalog: the paid shared library's own gates pass (curve, ledger, license, vision)", () => {
   const dir = join(PLUGINS, "_shared");
   if (!existsSync(join(dir, "test"))) return; // fresh clone: no paid tree
-  const r = run(["--test", "test/"], dir);
+  const r = run(["--test", "test/*.test.js"], dir);
   assert.equal(r.status, 0, r.output);
 });
 
@@ -72,7 +72,7 @@ for (const { id } of CATALOG) {
     }
     assert.ok(existsSync(join(dir, "test")), `${id} ships no tests`);
     assert.ok(existsSync(join(dir, "README.md")), `${id} ships no README`);
-    const r = run(["--test", "test/"], dir);
+    const r = run(["--test", "test/*.test.js"], dir);
     assert.equal(r.status, 0, `${id} unit suite failed:\n${r.output}`);
   });
 }
@@ -80,11 +80,19 @@ for (const { id } of CATALOG) {
 /** Run `node --test` in a child process, capturing merged output.
  *  AXUSE_KEYCHAIN=0 severs the macOS Keychain fallback so unit suites are
  *  deterministic regardless of what the host has stored under service
- *  "axuse" (the fallback itself has its own injected-runner tests). */
+ *  "axuse" (the fallback itself has its own injected-runner tests).
+ *  NODE_TEST_CONTEXT (and friends) MUST be stripped: a `node --test` child
+ *  spawned from inside a test file inherits it, Node then believes the run
+ *  is recursive and SILENTLY SKIPS every file with a warning and exit 0 —
+ *  the catalog suites would pass without ever running (verified live on
+ *  Node 22/25). Deleting the marker makes the child a fresh root run.
+ *  The glob (not a bare directory) keeps discovery working across Node
+ *  versions: Node >= 25 rejects directory args with MODULE_NOT_FOUND. */
 function run(args, cwd) {
+  const env = { ...process.env, AXUSE_KEYCHAIN: "0" };
+  for (const k of Object.keys(env)) if (k.startsWith("NODE_TEST_")) delete env[k];
   const r = spawnSync(process.execPath, args, {
-    cwd, encoding: "utf8", timeout: 600_000, windowsHide: true,
-    env: { ...process.env, AXUSE_KEYCHAIN: "0" },
+    cwd, encoding: "utf8", timeout: 600_000, windowsHide: true, env,
   });
   return { status: r.status, output: `${r.stdout ?? ""}\n${r.stderr ?? ""}` };
 }

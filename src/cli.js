@@ -296,6 +296,10 @@ async function doctor() {
   out(`native WebSocket: ${hasWs ? "yes" : "NO — need Node >= 22"}`);
   const browser = locateBrowser();
   out(`browser: ${browser ?? "not found (set AXUSE_BROWSER)"}`);
+  // Server-mode readiness, hoisted: the desktop-driver section below and the
+  // smoke test both report against the same facts.
+  let serverModeReady = false;
+  let serverModeActive = false;
   if (process.platform === "linux") {
     // Chrome keeps shared memory in /dev/shm; a full tmpfs kills headed AND
     // headless launches with a bare crash. axuse auto-passes
@@ -313,6 +317,31 @@ async function doctor() {
       }
     } catch {
       // no /dev/shm mount — the launch path mitigates silently
+    }
+    // Server mode: the anti-bot-safe lane for display-less hosts (headed
+    // Chrome on an auto-booted Xvfb — never --headless, which challenge
+    // pages detect first).
+    const vd = await import("./core/vdisplay.js");
+    const displayAlive = vd.displayUsable();
+    if (displayAlive) {
+      out(`server mode: not needed — X display ${process.env.DISPLAY} is alive; Chrome launches headed on it`);
+    } else if (!vd.serverModeEnabled()) {
+      out("server mode: DISABLED (AXUSE_SERVER_MODE=0) and no live X display — headed Chrome will fail typed; unset AXUSE_SERVER_MODE to auto-boot Xvfb, or run under xvfb-run / in a desktop session");
+    } else if (!vd.xvfbBinary()) {
+      out("server mode: NOT READY — no live X display and Xvfb not found: sudo apt-get install -y xvfb (challenge/anti-bot pages detect --headless Chrome; headed-on-Xvfb is the supported server lane; headless stays available for trusted internal pages via AXUSE_HEADLESS=1 or headless: true)");
+    } else {
+      serverModeReady = true;
+      const geo = vd.displayGeometry();
+      out(`server mode: ready — no live X display; headed Chrome will auto-boot a private Xvfb (${geo.w}x${geo.h}x${geo.d}, NOT headless — anti-bot-safe; AXUSE_DISPLAY_SIZE to change, AXUSE_SERVER_MODE=0 to disable)`);
+    }
+    serverModeActive = vd.virtualDisplayStatus().active;
+    const fonts = vd.fontHint(vd.fontProbe());
+    if (fonts) out(`fonts: ${fonts}`);
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      out("running as root: server-mode launches add --no-sandbox automatically (Chrome refuses root otherwise; AXUSE_NO_SANDBOX=1 forces it for any launch mode)");
+    }
+    if (/^(1|true)$/i.test(process.env.AXUSE_HEADLESS ?? "")) {
+      out("AXUSE_HEADLESS=1 is set: EVERY launch runs --headless and challenge/anti-bot pages WILL detect it — unset it on servers (server mode keeps Chrome headed for free)");
     }
   }
   if (process.platform === "win32" || process.platform === "darwin") {
@@ -356,7 +385,9 @@ async function doctor() {
       }
     }
   } else if (process.platform === "linux") {
-    if (!process.env.DISPLAY) {
+    if (serverModeActive || serverModeReady) {
+      out(`desktop driver: mounts on the server-mode virtual display (${serverModeActive ? "booted" : "boots at the first browser launch"}; ax_desktop_* then speaks XTEST + EWMH over it)`);
+    } else if (!process.env.DISPLAY) {
       out(`desktop driver: not available — DISPLAY is not set (X11/XWayland session required; browser tools still work${process.env.WAYLAND_DISPLAY ? "; this looks like a native Wayland session — XWayland usually provides DISPLAY like :0/:1" : ""})`);
     } else {
       try {
@@ -393,13 +424,30 @@ async function doctor() {
     out(`bridge hub: ${e.message}`);
   }
   if (browser && hasWs) {
-    out("smoke test: launching headless browser, opening a page, observing…");
+    // On a display-less Linux host with Xvfb, smoke-test the REAL production
+    // lane: headed Chrome on an auto-booted virtual display (asserts the
+    // anti-bot facts: no Headless UA, no webdriver flag, real viewport).
+    // Everywhere else, the classic headless smoke (no display required).
+    const vdMod = process.platform === "linux" ? await import("./core/vdisplay.js") : null;
+    const useServerMode = !!vdMod && !vdMod.displayUsable() && vdMod.serverModeEnabled() && !!vdMod.xvfbBinary();
+    if (useServerMode) {
+      out("smoke test: server mode — booting a virtual display, launching HEADED Chrome…");
+    } else {
+      out("smoke test: launching headless browser, opening a page, observing…");
+    }
     try {
       const { Controller } = await import("./core/controller.js");
       const c = new Controller();
       const html = `data:text/html,<button id="b" onclick="this.textContent='clicked'">go</button><input id="i" value="">`;
-      const r = await c.execute("open", { url: html, headless: true, settle_ms: 100 });
+      const r = await c.execute("open", { url: html, ...(useServerMode ? {} : { headless: true }), settle_ms: 100 });
       const obs = r.observation;
+      if (useServerMode) {
+        const ua = JSON.parse((await c.execute("evaluate", { expression: "navigator.userAgent" })).value ?? '""');
+        const fp = JSON.parse((await c.execute("evaluate", { expression: "({webdriver: navigator.webdriver, w: innerWidth, h: innerHeight, webgl: !!document.createElement('canvas').getContext('webgl')})" })).value ?? "{}");
+        const antiBotOk = !/headless/i.test(String(ua)) && fp.webdriver === false && fp.w >= 1200;
+        out(`server-mode facts: display ${r.display?.id} (virtual) · UA ${/headless/i.test(String(ua)) ? "CONTAINS Headless (BAD)" : "headed (no Headless substring)"} · navigator.webdriver ${fp.webdriver} · viewport ${fp.w}x${fp.h} · WebGL ${fp.webgl ? "present (SwiftShader)" : "absent"}`);
+        out(`server-mode anti-bot posture: ${antiBotOk && fp.webgl ? "OK — indistinguishable headed build" : "CHECK the facts above"}`);
+      }
       const click = await c.execute("click", { target: { ref: "e1" }, settle_ms: 100 });
       const ok = /clicked|changed/.test(click.observation?.text ?? "");
       out(`smoke test: ${ok ? "OK — observed tree, clicked ref e1, saw the diff" : "partial — observe worked, verify diff below"}`);

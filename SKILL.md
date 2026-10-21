@@ -61,6 +61,14 @@ Loaded plugins may also contribute **capability tools** (`ax_vault`,
 `tools()` export — capability surfaces, not solves. `ax_plugins` lists each
 loaded package together with its contributed tool names.
 
+**Servers (no desktop):** on a display-less Linux host axuse auto-boots a
+private Xvfb and keeps Chrome fully **headed** on it — never pass
+`headless: true` for challenge/anti-bot pages (they check headless first).
+The `ax_open` result reports the fact: `display: :N (virtual …)`. Solvers
+work unchanged; vision needs `<PREFIX>_VISION_KEY` (any OpenAI-compatible
+endpoint) or the owner-only `~/.config/axuse/secrets.json`. Full lane:
+`docs/server-mode.md`.
+
 ## Error vocabulary (typed — read `code`, `hint`, `retry`)
 
 - `REF_NOT_FOUND` / `STALE_STATE` → the page changed under you: `retry:
@@ -137,8 +145,9 @@ Verified live.
 activation, RandR per-monitor layout in `ax_desktop_screen_info` — and the
 **structure-first layer through AT-SPI** (zero-dependency D-Bus client):
 `ax_desktop_ax_snapshot/ax_click/ax_set/ax_read` with refs, roles, names,
-bounds and states, like macOS System Events. No extra packages; `xvfb-run`
-covers headless hosts. Coordinates are root-window pixels. Screenshots honor
+bounds and states, like macOS System Events. No extra packages; headless
+hosts are covered by server mode's auto-booted Xvfb (`xvfb-run` also works).
+Coordinates are root-window pixels. Screenshots honor
 the byte budget with a quality → quality → downscale ladder (vision keeps a
 usable image instead of a dead end), and `ax_desktop_type` pastes long or
 non-keymap text through the clipboard when xclip is present (reported

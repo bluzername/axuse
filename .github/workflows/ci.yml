@@ -142,3 +142,41 @@ jobs:
         run: node tools/skip-audit.mjs "$RUNNER_TEMP/tap.txt"
       - name: Doctor smoke
         run: node src/cli.js doctor
+
+  # ---------------------------------------------------------- Linux server
+  # The production server lane: NO desktop session and NO DISPLAY — the
+  # exact deployment shape for agent CLIs (codex, claude code, opencode) on
+  # Ubuntu servers. Challenge/anti-bot pages detect --headless Chrome as
+  # their first step, so the supported lane is HEADED Chrome on an
+  # auto-booted private Xvfb (server mode). test/server-mode.test.js asserts
+  # the anti-bot posture live (no Headless UA, navigator.webdriver false,
+  # desktop viewport, WebGL) with a forced dead DISPLAY — hermetic.
+  linux-server:
+    name: Linux server (ubuntu-latest, no display, Node 22)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Chrome for Testing + Xvfb + fonts
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/cft.json"
+          curl --fail --silent --show-error --location \
+            https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json \
+            --output "$metadata"
+          url="$(node -e 'const fs=require("node:fs"); const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const hit=d.channels.Stable.downloads.chrome.find((x)=>x.platform==="linux64"); if(!hit) process.exit(2); process.stdout.write(hit.url);' "$metadata")"
+          curl --fail --silent --show-error --location "$url" --output "$RUNNER_TEMP/cft.zip"
+          unzip -q "$RUNNER_TEMP/cft.zip" -d "$RUNNER_TEMP/cft"
+          echo "AXUSE_BROWSER=$RUNNER_TEMP/cft/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb fonts-liberation fonts-dejavu-core fontconfig
+      - name: Full suite with DISPLAY unset (server mode auto-boots Xvfb)
+        run: |
+          set -o pipefail
+          env -u DISPLAY node --test --test-timeout=90000 --test-reporter=tap test/*.test.js | tee "$RUNNER_TEMP/tap.txt"
+      - name: Skip audit
+        run: node tools/skip-audit.mjs "$RUNNER_TEMP/tap.txt"
+      - name: Doctor smoke (server mode: headed Chrome on an auto-booted Xvfb)
+        run: env -u DISPLAY node src/cli.js doctor

@@ -13,6 +13,7 @@ import { accessSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, st
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { AxError, Codes } from "./errors.js";
+import { ensureVirtualDisplay, needsNoSandbox, serverModePlan, virtualDisplayStatus } from "./vdisplay.js";
 
 const SEND_TIMEOUT_MS = 30_000;
 
@@ -318,6 +319,19 @@ export class BrowserHandle {
     try { mkdirSync(profileRoot, { recursive: true }); } catch {}
     sweepStaleProfiles(profileRoot);
     const dir = persistent ? userDataDir : mkdtempSync(join(profileRoot, "axuse-profile-"));
+    // Server mode (display-less Linux host): boot a private Xvfb and keep
+    // Chrome FULLY HEADED on it. Headless is the detected signal challenge
+    // pages look for first — a virtual display is the anti-bot-safe lane.
+    if (!headless && process.platform === "linux") {
+      const plan = serverModePlan({ headless: false });
+      if (plan.action === "boot") {
+        await ensureVirtualDisplay();
+      } else if (plan.action === "fail-xvfb" || plan.action === "fail-disabled") {
+        throw new AxError(Codes.LAUNCH_FAILED,
+          `Headed Chrome cannot run here: ${plan.reason}.${plan.hint ? ` ${plan.hint}` : ""}`,
+          { retry: "never" });
+      }
+    }
     const args = [
       `--user-data-dir=${dir}`,
       "--remote-debugging-port=0", // ephemeral port, parsed from stderr
@@ -329,6 +343,19 @@ export class BrowserHandle {
       "--remote-allow-origins=*", // modern Chrome rejects unknown ws Origins
     ];
     if (headless) args.push("--headless");
+    const vd = virtualDisplayStatus();
+    if (vd.active) {
+      // No monitor is attached to a virtual display: give Chrome a real
+      // desktop viewport instead of the tiny WM-less default, and keep
+      // killed persistent profiles from waking up behind a restore bubble.
+      args.push(`--window-size=${vd.width},${vd.height}`, "--window-position=0,0", "--hide-crash-restore-bubble");
+      // Chrome ≥ 139 ships WITHOUT the software-WebGL fallback (an anti-bot
+      // strong signal on GPU-less hosts): re-enable it so SwiftShader answers
+      // WebGL probes like any real desktop does. No-op when a GPU exists.
+      args.push("--enable-unsafe-swiftshader");
+      const sandbox = needsNoSandbox();
+      if (sandbox.add) args.push("--no-sandbox");
+    }
     if (linuxShmUnusable() && !args.includes("--disable-dev-shm-usage")) {
       // /dev/shm full/missing: without this the browser dies with SIGTRAP
       // before DevTools ever comes up (verified on Ubuntu 22.04).
@@ -439,6 +466,21 @@ export class BrowserHandle {
     await this.conn.send("Page.enable", {}, sessionId);
     await this.conn.send("Runtime.enable", {}, sessionId);
     await this.conn.send("Log.enable", {}, sessionId);
+    // Fingerprint neutralizer (NOT challenge tampering): modern Chrome sets
+    // navigator.webdriver=true merely because a DevTools client exists —
+    // a fingerprint OUR OWN plumbing creates, present on no human-driven
+    // Chrome. This runs before any page script on every new document and
+    // restores the exact value a human-driven browser reports (false).
+    // It does not fake, answer or shortcut any challenge — solvers still
+    // click real widgets with trusted input. Opt out: AXUSE_NEUTRALIZE_WEBDRIVER=0.
+    if (!/^(0|false|off|no)$/i.test(process.env.AXUSE_NEUTRALIZE_WEBDRIVER ?? "")) {
+      try {
+        await this.conn.send("Page.addScriptToEvaluateOnNewDocument", {
+          source: "try { delete navigator.webdriver; } catch {} "
+            + "Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true });",
+        }, sessionId);
+      } catch { /* older builds: skip, never fail the attach */ }
+    }
     // File inputs: intercept the native chooser (it would block forever) and
     // let ax_upload answer it with DOM.setFileInputFiles.
     try { await this.conn.send("Page.setInterceptFileChooserDialog", { enabled: true }, sessionId); } catch {}

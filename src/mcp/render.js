@@ -35,6 +35,7 @@ export function renderResult(command, result) {
   if (rest.ok !== undefined) facts.push(rest.ok ? `ok after ${rest.elapsed_ms}ms` : "timeout");
   if (rest.filled !== undefined) facts.push(`filled: ${[].concat(rest.filled).join("; ")}${rest.submitted ? `; then clicked ${rest.submitted}` : ""}`);
   if (rest.dialog) facts.push(`dialog open: ${rest.dialog.type} "${rest.dialog.message}" — answer with ax_dialog`);
+  if (rest.display?.virtual) facts.push(`display: ${rest.display.id} (virtual ${rest.display.width}x${rest.display.height} — headed on Xvfb, server mode)`);
   const parts = [];
   if (facts.length) parts.push(facts.join(" · "));
   if (rest.note) parts.push(`note: ${rest.note}`);
