@@ -4,7 +4,8 @@
 server plugs into Codex, Claude Code, OpenCode, Antigravity, or any
 MCP-capable host. Zero dependencies (Node ≥ 22). Windows desktop driver is
 verified; macOS desktop control is available as an explicit opt-in with
-native TCC permission checks.
+native TCC permission checks; Linux desktop control runs over X11/XWayland
+(XTEST input + capture + EWMH windows, zero extra packages).
 
 The design is distilled from the two best implementations of this problem —
 OpenAI's Codex Chrome extension and the ZCode harness — and exists to prove a
@@ -12,11 +13,12 @@ point: **a screenshot loop is not the right interface for a machine**. The
 DOM tree, the accessibility tree, and CDP are. axuse instruments the target
 instead of photographing it.
 
-If you are a journalist or other non-developer using Codex or ChatGPT Work,
-start with the [non-developer onboarding guide](docs/non-developer-onboarding.md).
-It explains the one-time connector setup, the first verification prompt, and
-copy-and-paste research prompts. The source repository's setup below is for
-developers and administrators.
+**Not a developer?** You don't need anything below. In the Claude desktop
+app, download `axuse.mcpb` from [ax-use.com](https://ax-use.com) and
+double-click it. In ChatGPT's Codex app, Claude Code, Cursor or any other
+agent, paste the [install prompt](https://ax-use.com/install.md) and the
+agent sets axuse up for you. See the
+[non-developer guide](docs/non-developer-onboarding.md).
 
 ## Proven in production
 
@@ -232,7 +234,8 @@ The ones that save the most steps:
 - JS dialogs and new tabs opened by an action are reported in its result.
 
 **Desktop** (Windows: verified. macOS: opt-in with
-`AXUSE_ENABLE_MACOS_CUA=1` and host Accessibility/Screen Recording grants):
+`AXUSE_ENABLE_MACOS_CUA=1` and host Accessibility/Screen Recording grants.
+Linux: automatic on X11/XWayland sessions with `DISPLAY` set):
 `ax_desktop_screenshot`, `ax_desktop_screen_info`,
 `ax_desktop_click`, `ax_desktop_type`, `ax_desktop_press`, `ax_desktop_scroll`,
 `ax_desktop_windows`, `ax_desktop_activate`, `ax_desktop_drag`.
@@ -294,8 +297,13 @@ Field notes (all established live against Edge 155 / Chrome 155):
   `AXUSE_ENABLE_MACOS_CUA=1`, grant the host Accessibility and Screen Recording
   in System Settings → Privacy & Security, then run `node src/cli.js doctor`.
   Coordinates are macOS global display points and returned desktop JPEGs are
-  resized to the same point dimensions for direct click mapping. Linux has no
-  desktop driver yet (browser tools still work).
+  resized to the same point dimensions for direct click mapping. Linux desktop
+  control mounts automatically on X11/XWayland sessions (needs `DISPLAY`;
+  Xvfb works for headless hosts) — and it is structure-first too: the AT-SPI
+  tree (via axuse's zero-dependency D-Bus client) mounts
+  ax_desktop_ax_snapshot/ax_click/ax_set/ax_read like macOS, plus EWMH
+  windows, RandR monitor layout, a screenshot budget ladder that downscales
+  instead of erroring, and clipboard-paste typing when xclip is installed.
 - **The extension backend has no Target domain** (chrome.debugger limits), so
   OOPIF frames are listed but not entered there; the CDP backend enters them.
 - **Anti-bot reality**: axuse runs a real Chromium with a real profile, but
@@ -317,7 +325,7 @@ summaries.
 ## Development
 
 ```bash
-node --test test/diff.test.js test/browser.test.js test/mcp.test.js test/desktop.test.js test/oopif.test.js test/bridge.test.js test/plugin.test.js
+node --test test/diff.test.js test/browser.test.js test/mcp.test.js test/desktop.test.js test/desktop-linux.test.js test/oopif.test.js test/bridge.test.js test/plugin.test.js
 ```
 
 On macOS, enable the passive desktop capability gates explicitly:
@@ -334,7 +342,9 @@ macOS builds is honestly skipped because it ignores automated
 `--load-extension`); desktop tests exercise passive screen/window discovery on
 macOS with `AXUSE_TEST_MACOS_DESKTOP=1`. A real macOS screenshot test is
 explicit with `AXUSE_TEST_MACOS_SCREENSHOT=1` because Screen Recording is
-TCC-protected. No test moves your real mouse or sends keys.
+TCC-protected. The Linux desktop tests boot their own private Xvfb displays
+(and skip typed when Xvfb is not installed); they never touch your session.
+No test moves your real mouse or sends keys.
 
 Debugging: `AXUSE_BRIDGE_DEBUG=1` traces hub + native-host messages;
 `self.__axuseDiag` in the extension SW reports connect/disconnect history.

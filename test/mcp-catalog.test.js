@@ -46,13 +46,22 @@ function startServer() {
       proc.stdin.write(JSON.stringify(msg) + "\n");
       return p;
     },
-    end() { proc.kill(); },
+    end() {
+      proc.kill();
+      // Await the child's exit — the file cannot finish while the server's
+      // async shutdown holds the stdio pipes open.
+      return new Promise((resolve) => {
+        if (proc.exitCode !== null) return resolve();
+        proc.once("exit", () => resolve());
+        setTimeout(resolve, 8_000);
+      });
+    },
   };
 }
 
 test("real MCP server + real catalog: every capability tool mounts; solve signposts honestly", { skip: !catalogPresent }, async (t) => {
   const srv = startServer();
-  t.after(() => srv.end());
+  t.after(async () => { await srv.end(); });
   await srv.call({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } });
   srv.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 

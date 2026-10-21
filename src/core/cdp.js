@@ -9,12 +9,28 @@
  * dependency-free — important for a library that harnesses vendor via MCP.
  */
 import { spawn } from "node:child_process";
-import { accessSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { accessSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statfsSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { AxError, Codes } from "./errors.js";
 
 const SEND_TIMEOUT_MS = 30_000;
+
+/** Chromium keeps its discardable/shared-memory segment in /dev/shm (tmpfs).
+ *  When that mount is full or missing, the browser aborts during startup —
+ *  on Linux with a bare "Browser exited during startup (code null)" and one
+ *  stderr line ("Less than 64MB of free space…"). Detect the condition and
+ *  steer Chrome to the disk-backed temp dir instead (the same thing the
+ *  --disable-dev-shm-usage flag does in every headless-container guide). */
+export function linuxShmUnusable() {
+  if (process.platform !== "linux") return false;
+  try {
+    const st = statfsSync("/dev/shm");
+    return BigInt(st.bavail) * BigInt(st.bsize) < 128n * 1024n * 1024n;
+  } catch {
+    return true; // no /dev/shm mount at all (some container/minimal images)
+  }
+}
 
 function isMacBrandedChrome(executable) {
   // ALL branded Chrome channels (stable/Beta/Dev/Canary) ignore
@@ -24,33 +40,62 @@ function isMacBrandedChrome(executable) {
     && /(?:^|\/)Google Chrome(?: Beta| Dev| Canary)?\.app\/Contents\/MacOS\/Google Chrome(?: Beta| Dev| Canary)?$/.test(executable);
 }
 
+/** Branded-Chrome builds that ignore --load-extension, per platform:
+ *  macOS .app bundles (live-verified) and the Linux distro packages
+ *  (live-verified on google-chrome-stable 151 / Ubuntu 22.04: the flag is
+ *  silently ignored — only built-in component extensions appear in
+ *  /json/list). Chrome-for-Testing's chrome-linux64 layout is NOT branded. */
+export function isBrandedChrome(executable) {
+  if (isMacBrandedChrome(executable)) return true;
+  if (process.platform === "linux") {
+    return /^\/usr\/bin\/google-chrome(-stable|-beta|-unstable)?$/.test(executable)
+      || /^\/opt\/google\/chrome\/chrome$/.test(executable);
+  }
+  return false;
+}
+
 /** Candidate Chromium-family executables, best first. */
 export function browserCandidates({ extensionCapable = false, browser, ignoreEnv = false, exact = false } = {}) {
   const out = [];
   if (!ignoreEnv && process.env.AXUSE_BROWSER && process.env.AXUSE_BROWSER.trim()) {
     const configured = process.env.AXUSE_BROWSER.trim();
-    // Current macOS branded Chrome builds silently ignore --load-extension.
-    // Do not let a general AXUSE_BROWSER override defeat the explicit
-    // extension-capable selection used by the bridge test/setup lane.
-    if (!(extensionCapable && isMacBrandedChrome(configured))) {
+    // Branded Chrome builds (macOS .app bundles; Linux distro packages)
+    // silently ignore --load-extension. Do not let a general AXUSE_BROWSER
+    // override defeat the explicit extension-capable selection used by the
+    // bridge test/setup lane.
+    if (!(extensionCapable && isBrandedChrome(configured))) {
       out.push(configured);
       return out;
     }
   }
   if (process.platform === "win32") {
     const chrome = [];
+    const chromeBeta = [];
+    const chromeCanary = [];
     const edge = [];
+    const edgeBeta = [];
     for (const envVar of ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]) {
       const base = process.env[envVar];
       if (!base) continue;
       chrome.push(join(base, "Google", "Chrome", "Application", "chrome.exe"));
+      // Per-user installs of the preview channels (the default for Beta/Canary).
+      if (envVar === "LOCALAPPDATA" || envVar === "ProgramFiles") {
+        chromeBeta.push(join(base, "Google", "Chrome Beta", "Application", "chrome.exe"));
+        chromeCanary.push(join(base, "Google", "Chrome SxS", "Application", "chrome.exe"));
+      }
     }
     for (const envVar of ["ProgramFiles", "ProgramFiles(x86)"]) {
       const base = process.env[envVar];
       if (!base) continue;
       edge.push(join(base, "Microsoft", "Edge", "Application", "msedge.exe"));
+      edgeBeta.push(join(base, "Microsoft", "Edge Beta", "Application", "msedge.exe"));
     }
-    out.push(...(browser === "edge" ? edge : browser === "chrome" ? chrome : [...chrome, ...edge]));
+    out.push(...(browser === "edge" ? edge
+      : browser === "edge-beta" ? edgeBeta
+        : browser === "chrome-beta" ? chromeBeta
+          : browser === "chrome-canary" ? chromeCanary
+            : browser === "chrome" ? [...chrome, ...edge]
+              : [...chrome, ...edge, ...edgeBeta, ...chromeBeta, ...chromeCanary]));
   } else if (process.platform === "darwin") {
     const app = (name, executable) => [
       `/Applications/${name}.app/Contents/MacOS/${executable}`,
@@ -100,20 +145,47 @@ export function browserCandidates({ extensionCapable = false, browser, ignoreEnv
       out.push(...chrome, ...cft, ...preview, ...chromium, ...edge);
     }
   } else {
+    // Linux: distro packages live in /usr/bin; snap Chromium installs to
+    // /snap/bin (Ubuntu's default Chromium is a snap). Branded Chrome on
+    // Linux IGNORES --load-extension (live-verified on google-chrome-stable
+    // 151 / Ubuntu 22.04 — only built-in component extensions appear), so it
+    // is excluded from the extension lane exactly like macOS branded builds.
     const chrome = [
       "/usr/bin/google-chrome",
       "/usr/bin/google-chrome-stable",
     ];
-    const chromium = ["/usr/bin/chromium", "/usr/bin/chromium-browser"];
+    const chromium = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/snap/bin/chromium"];
     const cft = ["/usr/bin/google-chrome-for-testing", "/usr/bin/chrome-for-testing"];
-    const edge = ["/usr/bin/microsoft-edge"];
+    const edge = ["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"];
+    const edgeBeta = ["/usr/bin/microsoft-edge-beta"];
     const chromeBeta = ["/usr/bin/google-chrome-beta"];
-    out.push(...(browser === "edge" ? edge
-      : browser === "chromium" ? chromium
-        : browser === "chrome-for-testing" ? cft
-          : browser === "chrome-beta" ? chromeBeta
-            : browser === "chrome" ? (exact ? chrome : [...chrome, ...cft, ...chromeBeta, ...chromium, ...edge])
-              : [...chrome, ...cft, ...chromeBeta, ...chromium, ...edge]));
+    const preview = [...chromeBeta, ...edgeBeta];
+    if (extensionCapable) {
+      const preferred = browser === "edge" ? [...edge, ...edgeBeta]
+        : browser === "edge-beta" ? edgeBeta
+          : browser === "chromium" ? chromium
+            : browser === "chrome-for-testing" ? cft
+              : [...edge, ...edgeBeta, ...chromium, ...cft];
+      out.push(...preferred);
+      for (const dir of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+        if (!browser || browser === "chromium") out.push(join(dir, "chromium"));
+        if (!browser || browser === "chrome-for-testing") out.push(join(dir, "google-chrome-for-testing"));
+      }
+    } else if (browser === "edge") {
+      out.push(...edge);
+    } else if (browser === "edge-beta") {
+      out.push(...edgeBeta);
+    } else if (browser === "chromium") {
+      out.push(...chromium);
+    } else if (browser === "chrome-for-testing") {
+      out.push(...cft);
+    } else if (browser === "chrome-beta") {
+      out.push(...chromeBeta);
+    } else if (browser === "chrome") {
+      out.push(...(exact ? chrome : [...chrome, ...cft, ...preview, ...chromium, ...edge]));
+    } else {
+      out.push(...chrome, ...cft, ...preview, ...chromium, ...edge, ...edgeBeta);
+    }
   }
   return [...new Set(out)];
 }
@@ -257,6 +329,11 @@ export class BrowserHandle {
       "--remote-allow-origins=*", // modern Chrome rejects unknown ws Origins
     ];
     if (headless) args.push("--headless");
+    if (linuxShmUnusable() && !args.includes("--disable-dev-shm-usage")) {
+      // /dev/shm full/missing: without this the browser dies with SIGTRAP
+      // before DevTools ever comes up (verified on Ubuntu 22.04).
+      args.push("--disable-dev-shm-usage");
+    }
     args.push(...extraArgs);
     const proc = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: false });
     let wsUrl;
@@ -264,17 +341,29 @@ export class BrowserHandle {
       wsUrl = await new Promise((resolve, reject) => {
         let buf = "";
         let settled = false;
+        let tail = ""; // last stderr/stdout chars — the only real evidence when a browser dies young
+        const noteTail = () => {
+          const t = tail.trim();
+          if (!t) return "";
+          const hint = /Less than \d+MB of free space/.test(t)
+            ? " Chrome ran out of shared-memory space (full /dev/shm or temp filesystem). Free space, or raise it, then retry."
+            : /X server|DISPLAY|display .*not/.test(t) && !process.env.DISPLAY && process.platform === "linux"
+              ? " Headed Chrome needs an X server: run inside the desktop session or under xvfb-run (or pass headless: true)."
+              : "";
+          return `${hint}\nBrowser output (tail): ${t}`;
+        };
         const timer = setTimeout(() => {
           try { proc.kill(); } catch {}
           if (!settled) {
             settled = true;
             reject(new AxError(Codes.LAUNCH_FAILED,
-              `Timed out after ${launchTimeoutMs}ms waiting for the DevTools WebSocket URL (first launch of a browser can be slow; raise AXUSE_LAUNCH_TIMEOUT_MS if this recurs)`,
+              `Timed out after ${launchTimeoutMs}ms waiting for the DevTools WebSocket URL (first launch of a browser can be slow; raise AXUSE_LAUNCH_TIMEOUT_MS if this recurs)${noteTail()}`,
               { retry: "retry" }));
           }
         }, launchTimeoutMs);
         const onData = (d) => {
           buf += String(d);
+          tail = (tail + String(d)).slice(-800);
           const m = buf.match(/DevTools listening on (ws:\/\/\S+)/);
           if (m) {
             settled = true;
@@ -290,11 +379,13 @@ export class BrowserHandle {
           settled = true;
           reject(new AxError(Codes.LAUNCH_FAILED, `Could not start browser: ${e.message}`, { retry: "never" }));
         });
-        proc.on("exit", (code) => {
+        proc.on("exit", (code, signal) => {
           clearTimeout(timer);
           if (settled) return;
           settled = true;
-          reject(new AxError(Codes.LAUNCH_FAILED, `Browser exited during startup (code ${code})`, { retry: "retry" }));
+          reject(new AxError(Codes.LAUNCH_FAILED,
+            `Browser exited during startup (code ${code}${signal ? `, signal ${signal}` : ""})${noteTail()}`,
+            { retry: "retry" }));
         });
       });
     } catch (e) {
@@ -386,7 +477,11 @@ export class BrowserHandle {
 /** Chrome's helper processes can hold profile files briefly after exit. */
 async function removeDirWithRetry(dir, attempts = 10) {
   for (let i = 0; i < attempts; i++) {
-    try { rmSync(dir, { recursive: true, force: true }); return true; } catch {}
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    // Verify, don't assume: Chrome's dying children can re-create files
+    // moments after a clean delete (late crashpad dumps) — the dir would
+    // silently reappear and look like a leak.
+    if (!existsSync(dir)) return true;
     await new Promise((ok) => setTimeout(ok, 200 * (i + 1)));
   }
   return false;

@@ -148,8 +148,11 @@ function openExtensionsPage(browser, browserPath) {  const url = "chrome://exten
     const app = apps[browser] ?? "Google Chrome";
     return launch("open", ["-a", app, url], app);
   }
-  const command = browserPath ?? (process.platform === "win32" ? "chrome.exe" : "google-chrome");
-  return launch(command, [url], browserPath ?? "browser");
+  const command = browserPath
+    ?? (process.platform === "win32" ? "chrome.exe" : undefined)
+    ?? (process.platform !== "darwin" ? locateBrowser() : undefined)
+    ?? "google-chrome";
+  return launch(command, [url], browserPath ?? command);
 }
 
 async function setupCmd() {
@@ -293,6 +296,25 @@ async function doctor() {
   out(`native WebSocket: ${hasWs ? "yes" : "NO — need Node >= 22"}`);
   const browser = locateBrowser();
   out(`browser: ${browser ?? "not found (set AXUSE_BROWSER)"}`);
+  if (process.platform === "linux") {
+    // Chrome keeps shared memory in /dev/shm; a full tmpfs kills headed AND
+    // headless launches with a bare crash. axuse auto-passes
+    // --disable-dev-shm-usage, but the underlying pressure is worth knowing.
+    try {
+      const { statfsSync } = await import("node:fs");
+      const st = statfsSync("/dev/shm");
+      const free = (BigInt(st.bavail) * BigInt(st.bsize)) / 1024n / 1024n;
+      const total = (BigInt(st.blocks) * BigInt(st.bsize)) / 1024n / 1024n;
+      const pct = total > 0n ? Number((free * 100n) / total) : 100;
+      if (free < 128n) {
+        out(`/dev/shm: ${free} MB free of ${total} MB — Chrome needs ≥64MB; axuse adds --disable-dev-shm-usage automatically, but free space if launches still fail`);
+      } else if (pct < 5) {
+        out(`/dev/shm: low (${free} MB free, ${pct.toFixed(0)}%) — axuse mitigates with --disable-dev-shm-usage`);
+      }
+    } catch {
+      // no /dev/shm mount — the launch path mitigates silently
+    }
+  }
   if (process.platform === "win32" || process.platform === "darwin") {
     if (process.platform === "darwin" && !/^(1|true)$/i.test(process.env.AXUSE_ENABLE_MACOS_CUA ?? "")) {
       out("desktop driver: disabled (set AXUSE_ENABLE_MACOS_CUA=1; Accessibility + Screen Recording grants are required for OS control)");
@@ -327,6 +349,29 @@ async function doctor() {
               out(`desktop screenshot: unavailable — ${e.message}`);
             }
           }
+        }
+        d.dispose();
+      } catch (e) {
+        out(`desktop driver: FAILED — ${e.message}`);
+      }
+    }
+  } else if (process.platform === "linux") {
+    if (!process.env.DISPLAY) {
+      out(`desktop driver: not available — DISPLAY is not set (X11/XWayland session required; browser tools still work${process.env.WAYLAND_DISPLAY ? "; this looks like a native Wayland session — XWayland usually provides DISPLAY like :0/:1" : ""})`);
+    } else {
+      try {
+        const d = await resolveDesktopDriver();
+        const info = await d.screenInfo();
+        out(`desktop driver: ok (X11/XWayland, XTEST + EWMH) — root window ${info.w}x${info.h} at (${info.x},${info.y}) (pixels)`);
+        try {
+          const clip = await d.constructor.clipboardAvailable?.();
+          out(`desktop clipboard paste: ${clip === undefined ? "unknown" : clip ? "available (xclip — long/untypeable text pastes via ctrl+v)" : "absent (type() synthesizes per key; sudo apt install xclip for the paste path)"}`);
+        } catch {}
+        try {
+          await d.screenshot({ x: info.x, y: info.y, w: 1, h: 1, budgetBytes: 20_000 });
+          out("desktop screenshot: ok");
+        } catch (e) {
+          out(`desktop screenshot: unavailable — ${e.message}`);
         }
         d.dispose();
       } catch (e) {

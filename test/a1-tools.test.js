@@ -79,7 +79,16 @@ function startServer(env) {
       proc.stdin.write(JSON.stringify(msg) + "\n");
       return p;
     },
-    end() { proc.kill(); },
+    end() {
+      proc.kill();
+      // Await the child's exit — the file cannot finish while the server's
+      // async shutdown holds the stdio pipes open.
+      return new Promise((resolve) => {
+        if (proc.exitCode !== null) return resolve();
+        proc.once("exit", () => resolve());
+        setTimeout(resolve, 8_000);
+      });
+    },
   };
 }
 
@@ -88,7 +97,7 @@ test("A1: plugin tools() export → validated → tools/list → tools/call → 
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // Point the loader ONLY at the fixture dir (skip the paid tree).
   const srv = startServer({ AXUSE_PLUGINS: dir, AXUSE_LICENSE_A1_DEMO: "x" });
-  t.after(() => srv.end());
+  t.after(async () => { await srv.end(); });
 
   await srv.call({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } });
   srv.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
@@ -134,7 +143,7 @@ export function tools() {
 }
 `);
   const srv = startServer({ AXUSE_PLUGINS: dir });
-  t.after(() => srv.end());
+  t.after(async () => { await srv.end(); });
   await srv.call({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } });
   const plugins = await srv.call({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "ax_plugins", arguments: {} } });
   const info = JSON.parse(plugins.result.content[0].text);

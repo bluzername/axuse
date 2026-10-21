@@ -39,13 +39,22 @@ function startServer() {
       proc.stdin.write(JSON.stringify(msg) + "\n");
       return p;
     },
-    end() { proc.kill(); },
+    end() {
+      proc.kill();
+      // The server's shutdown is async (browser/profile disposal) — the
+      // file cannot finish while the child's stdio pipes stay open.
+      return new Promise((resolve) => {
+        if (proc.exitCode !== null) return resolve();
+        proc.once("exit", () => resolve());
+        setTimeout(resolve, 8_000);
+      });
+    },
   };
 }
 
 test("mcp: handshake, tools/list, tools/call end-to-end", { skip: !hasBrowser }, async (t) => {
   const srv = startServer();
-  t.after(() => srv.end());
+  t.after(async () => { await srv.end(); });
 
   const init = await srv.call({
     jsonrpc: "2.0", id: 1, method: "initialize",
@@ -63,22 +72,46 @@ test("mcp: handshake, tools/list, tools/call end-to-end", { skip: !hasBrowser },
   assert.ok(names.includes("ax_click"));
   assert.ok(names.includes("ax_screenshot"));
   assert.ok(names.includes("ax_open_many"));
-  // Desktop tools are advertised when the platform driver is enabled.
-  const desktopExpected = process.platform === "win32" || (process.platform === "darwin" && process.env.AXUSE_ENABLE_MACOS_CUA === "1");
+  // Desktop tools are advertised when the platform driver is enabled. On
+  // Linux the driver mounts whenever DISPLAY is set AND an X server answers
+  // (CI runs a real Xvfb on :99; dead DISPLAY values must not count).
+  let linuxDesktopOk = false;
+  let linuxAtspiOk = false;
+  if (process.platform === "linux" && process.env.DISPLAY) {
+    linuxDesktopOk = await import("../src/desktop/index.js").then(async ({ resolveDesktopDriver }) => {
+      const d = await resolveDesktopDriver().catch(() => null);
+      if (!d) return false;
+      try { await d.screenInfo(); return true; } catch { return false; }
+      finally { d.dispose?.(); }
+    });
+    if (linuxDesktopOk) {
+      linuxAtspiOk = await import("../src/desktop/index.js").then(async ({ resolveDesktopDriver }) => {
+        const d = await resolveDesktopDriver().catch(() => null);
+        if (!d) return false;
+        try { return await d.axCapable(); } catch { return false; }
+        finally { d.dispose?.(); }
+      });
+    }
+  }
+  const desktopExpected = process.platform === "win32"
+    || (process.platform === "darwin" && process.env.AXUSE_ENABLE_MACOS_CUA === "1")
+    || linuxDesktopOk;
   if (desktopExpected) {
     assert.ok(names.includes("ax_desktop_screenshot"));
   } else {
     assert.ok(!names.includes("ax_desktop_screenshot"));
   }
-  // The macOS AX-structure tools mount ONLY with the macOS driver;
-  // Windows (coordinate driver) must not advertise them.
-  if (process.platform === "darwin" && process.env.AXUSE_ENABLE_MACOS_CUA === "1") {
+  // The AX-structure tools mount ONLY with a structure-first driver
+  // (macOS System Events; Linux AT-SPI). Windows (coordinate driver) must
+  // not advertise them.
+  const axExpected = (process.platform === "darwin" && process.env.AXUSE_ENABLE_MACOS_CUA === "1") || linuxAtspiOk;
+  if (axExpected) {
     for (const t of ["ax_desktop_ax_snapshot", "ax_desktop_ax_click", "ax_desktop_ax_set", "ax_desktop_ax_read"]) {
-      assert.ok(names.includes(t), `${t} mounted with the macOS driver`);
+      assert.ok(names.includes(t), `${t} mounted with the structure-first driver`);
     }
   } else {
     for (const t of ["ax_desktop_ax_snapshot", "ax_desktop_ax_click", "ax_desktop_ax_set", "ax_desktop_ax_read"]) {
-      assert.ok(!names.includes(t), `${t} must not mount without the macOS AX layer`);
+      assert.ok(!names.includes(t), `${t} must not mount without a platform AX layer`);
     }
   }
 
@@ -91,6 +124,7 @@ test("mcp: handshake, tools/list, tools/call end-to-end", { skip: !hasBrowser },
     const screenInfo = JSON.parse(screen.result.content[0].text);
     assert.ok(screenInfo.w > 0 && screenInfo.h > 0);
     if (process.platform === "darwin") assert.equal(screenInfo.coordinate_space, "macOS global display points");
+    if (process.platform === "linux") assert.match(screenInfo.coordinate_space, /X11 root window pixels/);
   }
 
   const page = `data:text/html,<button id="b" onclick="document.getElementById('o').textContent='done'">go</button><div id="o" style="min-height:1em"></div>`;

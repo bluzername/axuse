@@ -36,10 +36,11 @@ function extensionCapableBrowser() {
   for (const c of edgeCandidates) {
     try { accessSync(c); return c; } catch {}
   }
-  // Branded Chrome 137+ silently ignores --load-extension. On macOS the
-  // capability probe therefore excludes it; users can still load unpacked
-  // extensions manually in their normal Chrome profile.
-  return locateBrowser({ extensionCapable: process.platform === "darwin" });
+  // Branded Chrome 137+ silently ignores --load-extension (macOS .app builds
+  // AND the Linux distro packages — live-verified). The capability probe
+  // excludes both; users can still load unpacked extensions manually in
+  // their normal Chrome profile.
+  return locateBrowser({ extensionCapable: process.platform !== "win32" });
 }
 
 function browserKind(executable) {

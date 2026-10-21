@@ -53,7 +53,7 @@ jobs:
           AXUSE_TEST_MACOS_DESKTOP: "1"
         run: |
           set -o pipefail
-          node --test --test-reporter=tap test/*.test.js | tee "$RUNNER_TEMP/tap.txt"
+          node --test --test-timeout=90000 --test-reporter=tap test/*.test.js | tee "$RUNNER_TEMP/tap.txt"
       - name: Skip audit (every skip explicit, typed, CI-visible)
         run: node tools/skip-audit.mjs "$RUNNER_TEMP/tap.txt"
       - name: Doctor smoke
@@ -125,12 +125,19 @@ jobs:
           curl --fail --silent --show-error --location "$url" --output "$RUNNER_TEMP/cft.zip"
           unzip -q "$RUNNER_TEMP/cft.zip" -d "$RUNNER_TEMP/cft"
           echo "AXUSE_BROWSER=$RUNNER_TEMP/cft/chrome-linux64/chrome" >> "$GITHUB_ENV"
+      - name: Install AT-SPI sandbox deps (GTK app for the structure-layer E2E)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-gi gir1.2-gtk-3.0
       - name: Full suite (TAP for the skip audit)
         env:
           DISPLAY: ":99"
         run: |
           set -o pipefail
-          node --test --test-reporter=tap test/*.test.js | tee "$RUNNER_TEMP/tap.txt"
+          # A REAL X server on :99: the Linux desktop driver mounts against it
+          # (input synthesis is verified on the suite's own private Xvfb
+          # displays; :99 only lets the MCP layer mount the live tools).
+          Xvfb :99 -screen 0 1280x800x24 -ac -nolisten tcp &
+          sleep 2
+          node --test --test-timeout=90000 --test-reporter=tap test/*.test.js | tee "$RUNNER_TEMP/tap.txt"
       - name: Skip audit
         run: node tools/skip-audit.mjs "$RUNNER_TEMP/tap.txt"
       - name: Doctor smoke

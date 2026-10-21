@@ -199,7 +199,7 @@ the `ax_*` browser tools — never a hang or a generic failure.
 | Lane | Where | What it proves |
 |---|---|---|
 | `macos-26`, `macos-15`, `macos-15-intel` | CI (`ci.yml`) | Full suite × 3 runners (2 versions × arm64 + Intel), CfT installed, gates on, skip audit, doctor, bridge-security assertion |
-| `windows-latest`, `ubuntu-latest` | CI (`ci.yml`) | Cross-platform guard (Windows desktop driver live; Linux browser tools with CfT) |
+| `windows-latest`, `ubuntu-latest` | CI (`ci.yml`) | Cross-platform guard (Windows desktop driver live; Linux browser tools with CfT, Linux desktop driver against a CI Xvfb) |
 | Plugin E2E | CI-private runner or dev machine | `AXUSE_TEST_LIVE_*=1 node --test test/plugins.test.js` — every plugin's unit + live suite on macOS |
 | `tcc-manual` | `tcc-manual.yml`, self-hosted | Granted-state proofs: real (corner) capture, inert zero-delta CGEvent, recovery re-probe. Fails closed with typed instructions if the runner's grants are missing. Zero skips allowed. |
 
@@ -263,7 +263,10 @@ Measured on Apple M1, macOS 26.6, Node 26 (`bench/macos-hotpaths.mjs`):
 7. **Vision-gated plugin live demos** (challenge-handler B–E) — require
    `CHALLENGE_VISION_KEY` / `CHALLENGE_CF_DEMO_URL`; they self-skip typed and
    are listed in the allowlist. Not macOS-specific.
-8. **Linux desktop driver** — does not exist (by design; browser tools only).
+8. **Linux desktop driver** — shipped (X11/XWayland). Structure-first via
+   AT-SPI (ax_desktop_ax_snapshot/click/set/read over axuse's zero-dep
+   D-Bus client) plus coordinate+vision input/capture, EWMH windows and
+   RandR monitor layout — the macOS pattern, on Linux.
 
 ## Release checklist
 

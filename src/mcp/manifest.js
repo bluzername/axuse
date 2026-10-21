@@ -178,7 +178,7 @@ export function desktopTools(driverAvailable, axCapable = false) {
     },
     ...((axCapable) ? [{
       name: "ax_desktop_ax_snapshot",
-      description: "STRUCTURE-FIRST desktop snapshot (macOS): the app's accessibility tree with roles, titles, values, bounds, and live refs — the desktop twin of ax_observe. Pick the app by pid (from ax_desktop_windows), exact name, or front:true for the active app. Budgeted (250 nodes / depth 10 defaults; truncation reported as facts). Refs re-resolve at action time; act with ax_desktop_ax_click / set / read.",
+      description: "STRUCTURE-FIRST desktop snapshot (macOS System Events / Linux AT-SPI): the app's accessibility tree with roles, titles, values, bounds, and live refs — the desktop twin of ax_observe. Pick the app by pid (from ax_desktop_windows), exact name, or front:true for the active app. Budgeted (250 nodes / depth 10 defaults; truncation reported as facts). Refs re-resolve at action time; act with ax_desktop_ax_click / set / read.",
       inputSchema: {
         type: "object",
         properties: {

@@ -42,7 +42,14 @@ export async function createServer({ controller = new Controller(), desktop, sol
     : await loadSolvers(process.env.AXUSE_PLUGINS === "" ? [] : pluginDirs());
   const registry = loaded.solvers ?? loaded;
   const loadErrors = loaded.errors ?? [];
-  const tools = [...browserTools(), ...desktopTools(!!driver, !!(driver && typeof driver.axSnapshot === "function")), ...solverTools(registry), ...pluginTools(registry)];
+  // AX-structure tools mount only when the driver's platform AX layer is
+  // REALLY usable — on Linux that means AT-SPI answers (dead registries
+  // hide the tools instead of advertising typed failures).
+  let axCapable = !!(driver && typeof driver.axSnapshot === "function");
+  if (axCapable && typeof driver.axCapable === "function") {
+    axCapable = await driver.axCapable().catch(() => false);
+  }
+  const tools = [...browserTools(), ...desktopTools(!!driver, axCapable), ...solverTools(registry), ...pluginTools(registry)];
 
   const byName = new Map(tools.map((t) => [t.name, t]));
 

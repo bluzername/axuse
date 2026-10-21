@@ -22,7 +22,12 @@
  *     loads with AXUSE_ENABLE_MACOS_CUA=1; reports TCC failures clearly.
  *     AX-tree ops need the Accessibility grant; capture needs Screen
  *     Recording.
- *   - Linux:   no driver yet (browser tools still work).
+ *   - Linux:   zero-dependency X11/XWayland driver (src/desktop/linux.js):
+ *     XTEST FakeInput for trusted input, GetImage+baseline JPEG for
+ *     capture, EWMH for the window list and activation. Mounts whenever
+ *     DISPLAY is set (verified on Xorg 1.21 / Ubuntu 22.04+ and Xvfb);
+ *     native Wayland sessions without XWayland fail typed with guidance.
+ *     Coordinate+vision mode, like Windows — no AT-SPI AX tree in v1.
  *
  * The driver interface is the seam: a Windows UIA driver slots in behind
  * the same tools without touching the contract.
@@ -241,7 +246,9 @@ class WindowsDriver {
 let cached = null;
 
 /** Get the platform driver, or null when unsupported. Tools hide when null.
- * macOS remains explicitly opt-in because it can synthesize OS input. */
+ * macOS remains explicitly opt-in because it can synthesize OS input; the
+ * Linux X11 driver mounts when a DISPLAY is configured (same trust level as
+ * the always-on Windows console-session driver). */
 export function getDesktopDriver() {
   if (process.platform === "win32") {
     if (!cached) cached = new WindowsDriver();
@@ -257,6 +264,20 @@ export function getDesktopDriver() {
         cached = null;
         throw e;
       });
+    }
+    return cached;
+  }
+  if (process.platform === "linux") {
+    if (!process.env.DISPLAY) return null; // no X11/XWayland to drive
+    if (!cached) {
+      // Lazy import keeps the X11/JPEG modules out of non-Linux paths; the
+      // driver resolves through resolveDesktopDriver() like the macOS one.
+      cached = import("./linux.js")
+        .then(({ LinuxDriver }) => new LinuxDriver())
+        .catch((e) => {
+          cached = null;
+          throw e;
+        });
     }
     return cached;
   }
@@ -279,9 +300,14 @@ export function desktopUnavailable() {
   const macNote = process.platform === "darwin"
     ? " The macOS driver is disabled: set AXUSE_ENABLE_MACOS_CUA=1; desktop input/capture also needs Accessibility and Screen Recording grants for the host."
     : "";
+  const linuxNote = process.platform === "linux" && !process.env.DISPLAY
+    ? " The Linux driver speaks X11/XWayland: set DISPLAY (usually :0/:1) — or run under xvfb-run — and the ax_desktop_* tools mount automatically."
+    : "";
   throw new AxError(Codes.DESKTOP_DRIVER_UNAVAILABLE,
     process.platform === "darwin"
       ? `Desktop control is disabled on macOS until explicitly enabled.${macNote}`
-      : `Desktop control is not implemented for ${process.platform} yet.${macNote}`,
+      : process.platform === "linux"
+        ? `Desktop control is unavailable on this Linux session.${linuxNote}`
+        : `Desktop control is not implemented for ${process.platform} yet.${macNote}`,
     { hint: "Prefer the ax_* browser tools whenever the target is a web page.", retry: "never" });
 }

@@ -132,6 +132,18 @@ the tabs axuse created — never your browser.
 pixels — get bounds from `ax_desktop_screen_info`/`ax_desktop_windows`).
 Verified live.
 
+**Linux** mounts the same tools automatically on X11/XWayland sessions
+(`DISPLAY` set): XTEST input, GetImage JPEG capture, EWMH window list and
+activation, RandR per-monitor layout in `ax_desktop_screen_info` — and the
+**structure-first layer through AT-SPI** (zero-dependency D-Bus client):
+`ax_desktop_ax_snapshot/ax_click/ax_set/ax_read` with refs, roles, names,
+bounds and states, like macOS System Events. No extra packages; `xvfb-run`
+covers headless hosts. Coordinates are root-window pixels. Screenshots honor
+the byte budget with a quality → quality → downscale ladder (vision keeps a
+usable image instead of a dead end), and `ax_desktop_type` pastes long or
+non-keymap text through the clipboard when xclip is present (reported
+honestly as `via: "clipboard-paste"`).
+
 **macOS** ships an opt-in driver (System Events keystroke, corrected
 CoreGraphics mouse/scroll events via JXA, and `screencapture` + `sips` pixels)
 that loads with `AXUSE_ENABLE_MACOS_CUA=1`. It reports TCC permission failures
