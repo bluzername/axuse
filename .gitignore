@@ -40,3 +40,6 @@ vaults/
 captures/
 plugins/licenses/
 *.bdic
+
+# agent-harness session state (never repo content)
+.opencode/
