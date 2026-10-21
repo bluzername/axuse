@@ -26,6 +26,8 @@
     "captcha-pro loads and its Turnstile path solves the official demo (test keys)": "live-gate-external: needs AXUSE_TEST_LIVE_CAPTCHA=1, a vision API key, and the public demo",
     "extension bridge: install → native messaging → drive the browser": "live-gate-browser: needs an extension-capable Chromium-family browser",
     "browser flow": "live-gate-browser: needs any Chromium-family browser (auto-detect or AXUSE_BROWSER)",
+    "human input: typing and clicking land as human-shaped trusted events": "live-gate-browser: needs any Chromium-family browser (headless hermetic)",
+    "proxy: browser egress": "live-gate-browser: needs any Chromium-family browser (local fixture proxy — no external service)",
     "fill: ARIA and native sliders via trusted Arrow keys": "live-gate-browser: needs any Chromium-family browser",
     "fill: foreign-tab refs fail with a hint naming the owning tab": "live-gate-browser: needs any Chromium-family browser",
     "mcp: handshake, tools/list, tools/call end-to-end": "live-gate-browser: needs any Chromium-family browser",

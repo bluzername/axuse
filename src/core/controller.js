@@ -18,7 +18,7 @@ import { captureScreenshot, DEFAULT_BUDGET_BYTES } from "./screenshot.js";
 import { virtualDisplayStatus } from "./vdisplay.js";
 import {
   click as doClick, hover as doHover, drag as doDrag, wheel as doWheel,
-  insertText, pressCombo, platformShortcut, selectAllCombo,
+  insertText, humanType, pressCombo, platformShortcut, selectAllCombo,
   refResolveExpression, selectOptionExpression, elementInfoExpression, fieldKindExpression, findOptionExpression,
   sliderValueExpression, settleExpression, waitForExpression, MOD,
 } from "./actuate.js";
@@ -289,7 +289,7 @@ export class Controller {
       throw new AxError(Codes.COMMAND_REJECTED, `url must start with http(s)://, file://, about:, data: or blob:`, { retry: "never" });
     }
     const headless = a.headless ?? /^(1|true)$/i.test(process.env.AXUSE_HEADLESS ?? "");
-    const browser = await this.ensureBrowser({ headless, cdpUrl: a.cdp_url, executablePath: a.executable_path, backend: a.backend, profileDir: a.profile_dir });
+    const browser = await this.ensureBrowser({ headless, cdpUrl: a.cdp_url, executablePath: a.executable_path, backend: a.backend, profileDir: a.profile_dir, proxy: a.proxy, proxyBypass: a.proxy_bypass });
     const { targetId, sessionId } = await browser.handle.createTab("about:blank");
     const tab = this.registerTab(browser, targetId, sessionId, "about:blank");
     const tabId = tab.tabId;
@@ -454,7 +454,7 @@ export class Controller {
     }
   }
 
-  async ensureBrowser({ headless, cdpUrl, executablePath, backend, profileDir }) {
+  async ensureBrowser({ headless, cdpUrl, executablePath, backend, profileDir, proxy, proxyBypass }) {
     // Extension backend: the user's real Chrome through the axuse bridge
     // (Codex pattern: one browser, the user's own, tabs visible to them).
     if (backend === "extension") {
@@ -474,7 +474,9 @@ export class Controller {
       this.browserIndex.set(key, browserId);
       return rec;
     }
-    const key = cdpUrl ? `attach:${cdpUrl}` : `launch:${headless ? "headless" : "headed"}:${profileDir ?? "ephemeral"}`;
+    const key = cdpUrl
+      ? `attach:${cdpUrl}`
+      : `launch:${headless ? "headless" : "headed"}:${proxy ?? process.env.AXUSE_PROXY ?? "direct"}:${profileDir ?? "ephemeral"}`;
     const existing = this.browserIndex.get(key);
     if (existing) {
       const b = this.browsers.get(existing);
@@ -484,7 +486,7 @@ export class Controller {
     }
     const handle = cdpUrl
       ? await BrowserHandle.attach(cdpUrl)
-      : await BrowserHandle.launch({ headless, executablePath, userDataDir: profileDir });
+      : await BrowserHandle.launch({ headless, executablePath, userDataDir: profileDir, proxy, proxyBypass });
     const browserId = `b${++this.browserSeq}`;
     const rec = { browserId, handle, tabs: new Set(), key };
     this.browsers.set(browserId, rec);
@@ -766,6 +768,7 @@ export class Controller {
       button: a.button ?? "left",
       count: a.count ?? 1,
       modifiers: this.modifierMask(a.modifiers),
+      human: !!a.human,
     }));
     const observation = await this.autoObserve(tab, a.settle_ms ?? 150);
     const popup = await this.popupReport(tab);
@@ -961,7 +964,14 @@ export class Controller {
     if (a.replace !== false) {
       await this.doSent(tab, () => pressCombo(this.ctx(tab, session), selectAllCombo()));
     }
-    await this.doSent(tab, () => insertText(this.ctx(tab, session), String(a.text)));
+    // human: per-key trusted events with a human cadence — for challenge and
+    // login fields where keystroke dynamics are sampled (DataDome-class).
+    // Default stays bulk insertText: fast, and what agent productivity needs.
+    if (a.human) {
+      await this.doSent(tab, () => humanType(this.ctx(tab, session), String(a.text)));
+    } else {
+      await this.doSent(tab, () => insertText(this.ctx(tab, session), String(a.text)));
+    }
     if (a.submit) {
       await this.doSent(tab, () => pressCombo(this.ctx(tab, session), "enter"));
     }

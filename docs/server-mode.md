@@ -95,6 +95,8 @@ For one-shot / cron-style runs no service is needed — `axuse solve`,
 | `AXUSE_TIMEZONE` | IANA zone for the Chrome process (`TZ`): drives `Date`/`Intl` in pages AND workers. Set it to the **egress persona's** zone — a UTC server behind a US residential exit is a classic timezone-mismatch score. Validated by `doctor`. |
 | `AXUSE_LANG` | `--accept-lang` for Chrome (verified live: `--lang` alone does **not** move `navigator.language`): sets `navigator.language`/`languages` **and** the `Accept-Language` header. |
 | `AXUSE_FP_CORES` / `AXUSE_FP_MEMORY` | Opt-in persona caps: a 96-core server's honest `hardwareConcurrency` is a persona mismatch for residential-looking traffic. `AXUSE_FP_CORES=8` overrides `navigator.hardwareConcurrency`; `AXUSE_FP_MEMORY` overrides `navigator.deviceMemory` — only where the platform exposes the API (never invents it). Honest hardware stays the default. |
+| `AXUSE_PROXY` | Per-process default for the per-launch `proxy` param: `"http://host:port"`, `"socks5://user:pass@host:port"` — one browser instance per spec, credentials answered over CDP. |
+| `AXUSE_PROXY_BYPASS` | Chrome proxy bypass list override (default: loopback bypassed so local fixtures work; `"<-loopback>"` includes localhost). |
 | `AXUSE_NO_SANDBOX` | `1` forces `--no-sandbox`. Auto-applied anyway when running as root (containers) — Chrome refuses root otherwise. |
 | `AXUSE_BROWSER` | Path to the browser binary (as on any host). |
 | `AXUSE_PROFILE_DIR` | Where browser profiles go (defaults to the OS temp dir). |
@@ -141,6 +143,52 @@ chmod 600 ~/.config/axuse/secrets.json
 
 `AXUSE_SECRETS_FILE` overrides the path. A file the group/world can read is
 refused (fix: `chmod 600`). Typed failure messages name the exact options.
+
+## Input realism (human-shaped trusted events)
+
+All input is CDP-trusted (`isTrusted` events). The **default** paths stay
+fast for agent productivity (bulk insert, direct press). Two lanes add the
+dynamics human-sampling systems look for — used automatically by the solver
+plugins where it matters:
+
+- **`ax_click {human: true}`** — a jittered curved mouse approach
+  (3–6 eased moves, 120–320 ms, 1–3 px overshoot-and-settle, dwell) before
+  the press. The captcha-pro Turnstile checkbox click and the
+  challenge-handler puzzle/confirm clicks use it.
+- **`ax_type {human: true}`** — per-key trusted events (keydown→hold→keyup
+  per char, 45–160 ms gaps, 6% thinking pauses, word-boundary slowdowns)
+  with real layout key codes — for login/challenge fields where keystroke
+  dynamics are sampled. Solver context: `ctx.type({..., human: true})`.
+- **Sliders/interstitials** already move humanly (the challenge-handler's
+  bezier trajectory engine with ≥8 velocity maxima and sub-8 ms jitter).
+
+## Egress: one browser, one proxy (per-instance routing)
+
+For fleets, each browser instance can leave through its own proxy —
+`ax_open {url, proxy: "socks5://user:pass@host:port"}` or `AXUSE_PROXY`
+for the process. Credentials never ride the launch flag (Chrome ignores
+them there); they are answered over CDP when the proxy challenges (the
+full 407 → auth → credentialed-retry round trip is covered by a live test
+against a local fixture proxy). Loopback stays bypassed by default so
+local fixtures keep working; override with `proxy_bypass` /
+`AXUSE_PROXY_BYPASS` (e.g. `"<-loopback>"` for proxy testing). One proxy
+spec = one browser instance (different specs never share a launch).
+
+Combine with `AXUSE_TIMEZONE`/`AXUSE_LANG` so the whole persona — IP,
+clock, languages — is coherent per instance.
+
+Note: a plugin that re-enables CDP `Fetch` with its own interception
+patterns takes over interception for that session and may drop the proxy
+auth subscription for those requests (documented integration seam).
+
+## Audio posture (honest, measured)
+
+On a GPU-less, sound-server-less host: `AudioContext` starts `suspended`
+and `resume()` before any user gesture stays pending — **exactly what a
+real desktop Chrome does** under the default autoplay policy.
+`OfflineAudioContext` — the actual audio-fingerprint vector — renders
+identically (pure math, verified live). If your flow needs audible audio
+after a gesture, run a sound server (`sudo apt install pipewire-pulse`).
 
 ## Persona coherence (the parts headless-vs-headed does not cover)
 

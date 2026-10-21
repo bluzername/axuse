@@ -66,8 +66,11 @@ private Xvfb and keeps Chrome fully **headed** on it — never pass
 `headless: true` for challenge/anti-bot pages (they check headless first).
 The `ax_open` result reports the fact: `display: :N (virtual …)`. Persona
 coherence with the egress persona is configured server-side
-(`AXUSE_TIMEZONE`, `AXUSE_LANG`; `navigator.webdriver` stays `false` via the
-`AutomationControlled` launch flag). Solvers work unchanged; vision needs
+(`AXUSE_TIMEZONE`, `AXUSE_LANG`, `AXUSE_PROXY`; `navigator.webdriver`
+stays `false` via the `AutomationControlled` launch flag). For
+dynamics-sensitive targets pass `human: true` on `ax_click` (jittered
+curved mouse approach) and `ax_type` (per-key cadence) — solver plugins
+already use it on challenge widgets. Solvers work unchanged; vision needs
 `<PREFIX>_VISION_KEY` (any OpenAI-compatible endpoint) or the owner-only
 `~/.config/axuse/secrets.json`. Full lane: `docs/server-mode.md`.
 

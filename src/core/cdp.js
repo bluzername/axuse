@@ -238,6 +238,34 @@ export function locateBrowser(options = {}) {
   return null;
 }
 
+/** Parse a proxy spec for one browser instance:
+ *    http://host:port · socks5://host:port · http://user:pass@host:port ·
+ *    host:port (scheme defaults to http)
+ *  → { server: "scheme://host:port", username?, password? } or throws typed
+ *  (COMMAND_REJECTED — fix the spec, don't retry). Credentials are NEVER
+ *  embedded in --proxy-server (Chrome ignores them there); they are
+ *  answered over CDP Fetch.authRequired instead. */
+export function parseProxySpec(spec) {
+  const raw = String(spec ?? "").trim();
+  if (!raw) return null;
+  const withScheme = /^[a-z0-9+.-]+:\/\//i.test(raw) ? raw : `http://${raw}`;
+  let url;
+  try { url = new URL(withScheme); } catch {
+    throw new AxError(Codes.COMMAND_REJECTED, `proxy is not a valid URL: "${raw}" (expected e.g. "http://host:port" or "socks5://user:pass@host:port")`, { retry: "never" });
+  }
+  const scheme = url.protocol.replace(":", "").toLowerCase();
+  if (!["http", "https", "socks4", "socks5"].includes(scheme)) {
+    throw new AxError(Codes.COMMAND_REJECTED, `proxy scheme must be http, https, socks4 or socks5 (got "${url.protocol}")`, { retry: "never" });
+  }
+  if (!url.hostname || !url.port || url.port === "0" || Number(url.port) > 65535) {
+    throw new AxError(Codes.COMMAND_REJECTED, `proxy needs a host and an explicit port: "${raw}"`, { retry: "never" });
+  }
+  const out = { server: `${scheme}://${url.hostname}:${url.port}` };
+  if (url.username) out.username = decodeURIComponent(url.username);
+  if (url.password) out.password = decodeURIComponent(url.password);
+  return out;
+}
+
 /** A single browser-level WebSocket connection with flat session routing. */
 export class CdpConnection {
   /** @param {string} wsUrl */
@@ -331,6 +359,7 @@ export class BrowserHandle {
     this.userDataDir = null;
     this.ephemeral = true; // false: a persistent A2 profile — never deleted
     this.launched = false;
+    this.proxyAuth = null; // { username, password } when launched with proxy creds
     this.tabs = new Map(); // tab_id → session bookkeeping (owned by controller)
   }
 
@@ -339,7 +368,7 @@ export class BrowserHandle {
    *  philosophy); headless is opt-in for servers and tests.
    *  `userDataDir` (plugin prerequisite A2, session-vault): reuse a PERSISTENT
    *  profile — not deleted on dispose, only swept by nobody but the owner. */
-  static async launch({ executablePath, headless = false, extraArgs = [], userDataDir, profileRoot: profileRootOverride } = {}) {
+  static async launch({ executablePath, headless = false, extraArgs = [], userDataDir, profileRoot: profileRootOverride, proxy, proxyBypass } = {}) {
     const exe = executablePath || locateBrowser();
     if (!exe) {
       throw new AxError(Codes.LAUNCH_FAILED,
@@ -379,6 +408,18 @@ export class BrowserHandle {
       "--remote-allow-origins=*", // modern Chrome rejects unknown ws Origins
     ];
     if (headless) args.push("--headless");
+    // Per-instance egress (fleet lane): one browser through one proxy.
+    // Credentials never ride in --proxy-server (Chrome ignores them there);
+    // they are answered over CDP Fetch.authRequired at attach time.
+    const proxySpec = parseProxySpec(proxy ?? process.env.AXUSE_PROXY ?? "");
+    if (proxySpec) {
+      args.push(`--proxy-server=${proxySpec.server}`);
+      // Loopback stays bypassed by default (local fixtures, the bridge hub);
+      // AXUSE_PROXY_BYPASS / proxy_bypass overrides, e.g. "<-loopback>" to
+      // include localhost for proxy testing.
+      const bypass = proxyBypass ?? process.env.AXUSE_PROXY_BYPASS;
+      if (bypass) args.push(`--proxy-bypass-list=${bypass}`);
+    }
     // Source-level posture fix (verified live, Chrome 151): with remote
     // debugging active, Chrome otherwise reports navigator.webdriver ===
     // true in EVERY context (main frames, cross-origin iframes) — a
@@ -480,6 +521,7 @@ export class BrowserHandle {
     h.userDataDir = dir;
     h.ephemeral = !persistent; // persistent (A2) profiles are never deleted on dispose
     h.launched = true;
+    if (proxySpec?.username) h.proxyAuth = { username: proxySpec.username, password: proxySpec.password ?? "" };
     h.conn = new CdpConnection(wsUrl);
     try {
       await h.conn.connect();
@@ -487,6 +529,12 @@ export class BrowserHandle {
       await h.dispose();
       throw e;
     }
+    // Proxy credentials over CDP: we subscribe to Fetch.authRequired at the
+    // CONNECTION level (one handler for every session) and answer Proxy
+    // challenges with the spec's credentials; Server challenges are cancelled
+    // (there is no dialog to show on a server, and a modal auth dialog would
+    // hang the tab). Registered once, before any tab exists.
+    if (h.proxyAuth) installProxyAuthHandler(h);
     return h;
   }
 
@@ -544,6 +592,16 @@ export class BrowserHandle {
       await this.conn.send("Target.setAutoAttach",
         { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId);
     }
+    // Proxy credentials: subscribe this session to auth challenges. NO
+    // patterns key — an explicit empty list disables the subscription on
+    // some builds, and an absent key only pauses (which the connection-
+    // level router passes through) while still delivering authRequired.
+    // (A plugin that later re-enables Fetch with its own patterns keeps
+    // interception but may drop this subscription — documented in
+    // docs/server-mode.md.)
+    if (this.proxyAuth) {
+      try { await this.conn.send("Fetch.enable", { handleAuthRequests: true }, sessionId); } catch {}
+    }
     return { targetId, sessionId };
   }
 
@@ -565,6 +623,45 @@ export class BrowserHandle {
     }
     if (this.userDataDir && this.ephemeral) await removeDirWithRetry(this.userDataDir);
   }
+}
+
+/** Connection-level proxy-auth router for one launched browser: Proxy-source
+ *  challenges get the spec's credentials; Server-source (401 from the site)
+ *  are cancelled — a server has no dialog to show, and Chrome's native auth
+ *  dialog would hang the tab. Any Fetch.requestPaused that reaches us (an
+ *  artifact of the auth subscription on some builds) is passed through —
+ *  this stays an auth router, never an interceptor. Registered once per
+ *  connection. */
+function installProxyAuthHandler(handle) {
+  handle.conn.onEvent((msg) => {
+    if (!handle.proxyAuth) return;
+    if (msg.method === "Fetch.requestPaused") {
+      handle.conn.send("Fetch.continueRequest", { requestId: msg.params?.requestId }, msg.sessionId)
+        .catch(() => {});
+      return;
+    }
+    if (msg.method !== "Fetch.authRequired") return;
+    const { requestId, authChallenge } = msg.params ?? {};
+    const isProxy = authChallenge?.source === "Proxy";
+    // Chrome builds disagree on the enum's casing (151: PascalCase
+    // "ProvideCredentials"; newer protocol revisions: lowerCamel). Answer in
+    // the handle's remembered style; flip it once on an "Unrecognized
+    // authChallengeResponse" error and retry — then it sticks.
+    const style = handle.proxyAuthStyle ?? "pascal";
+    const word = (p, l) => (style === "pascal" ? p : l);
+    const answer = isProxy
+      ? { response: word("ProvideCredentials", "provideCredentials"), username: handle.proxyAuth.username, password: handle.proxyAuth.password }
+      : { response: word("CancelAuth", "cancelAuth") };
+    handle.conn.send("Fetch.continueWithAuth", { requestId, authChallengeResponse: answer }, msg.sessionId)
+      .catch((e) => {
+        if (/authChallengeResponse/i.test(String(e.message)) && style === "pascal") {
+          handle.proxyAuthStyle = "lower";
+          handle.conn.send("Fetch.continueWithAuth", { requestId, authChallengeResponse: { ...answer, response: isProxy ? "provideCredentials" : "cancelAuth" } }, msg.sessionId)
+            .catch(() => { /* request already gone */ });
+        }
+        /* request already gone — nothing to answer */
+      });
+  });
 }
 
 /** Chrome's helper processes can hold profile files briefly after exit. */

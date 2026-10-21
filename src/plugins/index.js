@@ -25,7 +25,9 @@
  *   ctx.evaluate(expr)   → parsed JSON value of the in-page expression
  *                           (single-encoded: the raw ax_evaluate JSON string
  *                           is parsed for you — a real trap we hit live)
- *   ctx.click({x,y}|{ref}, {settleMs})
+ *   ctx.click({x,y}|{ref}, {settleMs, human})
+ *                          → human: true adds a jittered curved mouse
+ *                            approach before the press (challenge widgets)
  *   ctx.screenshot({crop:{x,y,w,h}, quality, budgetBytes})
  *                        → { base64, mime, bytes, quality, crop }
  *                           (crop-first: never vision-tax a whole page)
@@ -213,10 +215,11 @@ export function buildSolveContext(controller, tabId) {
         return r.value ?? null; // truncated / non-JSON: hand back the raw string
       }
     },
-    async click(target, { settleMs } = {}) {
+    async click(target, { settleMs, human } = {}) {
       const r = await controller.execute("click", {
         target: "ref" in target ? { ref: target.ref } : { x: target.x, y: target.y },
         ...(settleMs !== undefined ? { settle_ms: settleMs } : {}),
+        ...(human !== undefined ? { human } : {}),
         ...(tabId ? { tab_id: tabId } : {}),
       });
       return { actionSent: r.action_sent ?? null };
@@ -264,12 +267,13 @@ export function buildSolveContext(controller, tabId) {
       }));
       return { actionSent: r.action_sent ?? null };
     },
-    async type({ target, text, replace, submit, settleMs, tab_id } = {}) {
+    async type({ target, text, replace, submit, settleMs, tab_id, human } = {}) {
       const r = await controller.execute("type", withTab({
         text: String(text),
         ...(target !== undefined ? { target } : {}),
         ...(replace !== undefined ? { replace } : {}),
         ...(submit !== undefined ? { submit } : {}),
+        ...(human !== undefined ? { human } : {}),
         ...(settleMs !== undefined ? { settle_ms: settleMs } : {}),
         ...(tab_id ? { tab_id } : {}),
       }));
@@ -315,15 +319,17 @@ export function buildSolveContext(controller, tabId) {
       }));
     },
     /** Open a URL in a new tab (profileDir: persistent A2 profile). */
-    async open(url, { headless, profileDir, settleMs, executablePath } = {}) {
+    async open(url, { headless, profileDir, settleMs, executablePath, proxy, proxyBypass } = {}) {
       const r = await controller.execute("open", {
         url: String(url),
         ...(headless !== undefined ? { headless } : {}),
         ...(profileDir !== undefined ? { profile_dir: profileDir } : {}),
         ...(settleMs !== undefined ? { settle_ms: settleMs } : {}),
         ...(executablePath !== undefined ? { executable_path: executablePath } : {}),
+        ...(proxy !== undefined ? { proxy } : {}),
+        ...(proxyBypass !== undefined ? { proxy_bypass: proxyBypass } : {}),
       });
-      return { tabId: r.tab_id, browserId: r.browser_id, observation: r.observation, dialog: r.dialog ?? null };
+      return { tabId: r.tab_id, browserId: r.browser_id, observation: r.observation, dialog: r.dialog ?? null, display: r.display ?? null };
     },
     async navigate(url, { settleMs, tab_id } = {}) {
       const r = await controller.execute("navigate", withTab({

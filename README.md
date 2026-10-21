@@ -87,6 +87,7 @@ element refs like `[ref=e7]`. Each action returns only what changed.
 | `AXUSE_DISPLAY_SIZE` | virtual display geometry for server mode (default `1920x1080x24`; `random` = a stable geometry per machine, so a fleet is not all 1920x1080) |
 | `AXUSE_TIMEZONE` | IANA `TZ` for the Chrome process — `Date`/`Intl` in pages and workers match the egress persona (validated by `doctor`) |
 | `AXUSE_LANG` | `--accept-lang` for Chrome — `navigator.language(s)` and the `Accept-Language` header match the egress persona |
+| `AXUSE_PROXY` | route every launched browser through a proxy (`http://`·`socks5://`, credentials supported — answered over CDP); `ax_open {proxy}` sets it per launch |
 | `AXUSE_NO_SANDBOX=1` | force `--no-sandbox` (auto for root/container server runs) |
 | `AXUSE_NEUTRALIZE_WEBDRIVER=0` | disable the `navigator.webdriver` posture-fix fallback (the `AutomationControlled` launch flag already fixes it at the source) |
 | `AXUSE_HEADLESS=1` | launch the browser without a window — **trusted internal pages only**: challenge/anti-bot pages detect headless first; servers get server mode instead |

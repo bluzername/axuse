@@ -53,25 +53,6 @@ function startServer() {
 }
 
 test("mcp: handshake, tools/list, tools/call end-to-end", { skip: !hasBrowser }, async (t) => {
-  const srv = startServer();
-  t.after(async () => { await srv.end(); });
-
-  const init = await srv.call({
-    jsonrpc: "2.0", id: 1, method: "initialize",
-    params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "0" } },
-  });
-  assert.equal(init.result.serverInfo.name, "axuse");
-  assert.ok(init.result.capabilities.tools);
-
-  srv.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
-
-  const list = await srv.call({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  const names = list.result.tools.map((x) => x.name);
-  assert.ok(names.includes("ax_open"));
-  assert.ok(names.includes("ax_observe"));
-  assert.ok(names.includes("ax_click"));
-  assert.ok(names.includes("ax_screenshot"));
-  assert.ok(names.includes("ax_open_many"));
   // Desktop tools are advertised when the platform driver is enabled. On
   // Linux the driver mounts whenever DISPLAY is set AND an X server answers
   // (CI runs a real Xvfb on :99; dead DISPLAY values must not count).
@@ -96,8 +77,40 @@ test("mcp: handshake, tools/list, tools/call end-to-end", { skip: !hasBrowser },
   const desktopExpected = process.platform === "win32"
     || (process.platform === "darwin" && process.env.AXUSE_ENABLE_MACOS_CUA === "1")
     || linuxDesktopOk;
+
+  // NOTE on stability: this process probes X liveness AND the spawned
+  // server probes it independently at startup. Under full-suite parallel
+  // load the two probes can transiently disagree (one X connect beats a
+  // 1-2 s timeout, the other does not) — a cross-process race, not a
+  // product flake. On disagreement we respawn the server ONCE and re-list;
+  // a second disagreement fails.
+  const boot = async () => {
+    const srv = startServer();
+    const init = await srv.call({
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "0" } },
+    });
+    assert.equal(init.result.serverInfo.name, "axuse");
+    assert.ok(init.result.capabilities.tools);
+    srv.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+    const list = await srv.call({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    return { srv, names: list.result.tools.map((x) => x.name) };
+  };
+  let { srv, names } = await boot();
+  t.after(async () => { await srv.end(); });
+  if (!!names.includes("ax_desktop_screenshot") !== desktopExpected && process.platform === "linux" && process.env.DISPLAY) {
+    await srv.end();
+    ({ srv, names } = await boot());
+    t.after(async () => { await srv.end(); });
+  }
+
+  assert.ok(names.includes("ax_open"));
+  assert.ok(names.includes("ax_observe"));
+  assert.ok(names.includes("ax_click"));
+  assert.ok(names.includes("ax_screenshot"));
+  assert.ok(names.includes("ax_open_many"));
   if (desktopExpected) {
-    assert.ok(names.includes("ax_desktop_screenshot"));
+    assert.ok(names.includes("ax_desktop_screenshot"), "desktop tools mounted (parent probe saw a live display)");
   } else {
     assert.ok(!names.includes("ax_desktop_screenshot"));
   }

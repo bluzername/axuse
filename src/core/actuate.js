@@ -136,11 +136,99 @@ export async function pressCombo(ctx, combo) {
 
 const BUTTON_MAP = { left: "left", middle: "middle", right: "right", 1: "left", 2: "middle", 3: "right" };
 
-/** Dispatch a trusted click (hover-move → press → release). */
-export async function click(ctx, { x, y, button = "left", count = 1, modifiers = 0 }) {
+const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+
+/* --------------------------------------------------- human input realism */
+
+/** Key descriptor for one printable character: known layout codes when the
+ *  key exists on a US layout (letters, digits, space), a plain text-bearing
+ *  key event otherwise (e.code "" is what IME/dead-key input reports too). */
+function charKey(ch) {
+  const known = KEYS[ch];
+  if (known && known.text === ch) return known;
+  return { vk: 0, key: ch, code: "", text: ch };
+}
+
+/** Human keystroke plan: per-char { …key, delayMs (approach gap), holdMs
+ *  (down→up) }. The shape keystroke-dynamics systems sample: mostly
+ *  45–160 ms gaps, a few thinking pauses (6%), slightly longer word
+ *  boundaries and 25–90 ms holds. Pure — injectable randomness for tests. */
+export function planHumanKeystrokes(text, { random = Math.random } = {}) {
+  const chars = [...String(text)];
+  return chars.map((ch, i) => {
+    const wordBoundary = i > 0 && chars[i - 1] === " ";
+    const thinking = random() < 0.06;
+    const base = 45 + random() * 115;
+    const delayMs = thinking
+      ? 180 + random() * 270
+      : Math.round(base + (wordBoundary ? 20 + random() * 40 : 0));
+    return { ...charKey(ch), delayMs: i === 0 ? Math.round(base / 2) : delayMs, holdMs: Math.round(25 + random() * 65) };
+  });
+}
+
+/** Per-key trusted typing (keydown→hold→keyup per char, human cadence).
+ *  The default type path stays bulk insertText (fast, agent-productivity);
+ *  this is the lane for challenge/login fields where keystroke dynamics
+ *  are sampled (DataDome-class). */
+export async function humanType(ctx, text, { random = Math.random } = {}) {
+  for (const k of planHumanKeystrokes(text, { random })) {
+    await sleep(k.delayMs);
+    await keyEvent(ctx, "keyDown", k, 0, true);
+    await sleep(k.holdMs);
+    await keyEvent(ctx, "keyUp", k, 0, false);
+  }
+}
+
+/** Human mouse approach before a click: a jittered quadratic curve from a
+ *  random offset (40–130 px away), 3–6 eased moves over 120–320 ms, a
+ *  1–3 px overshoot-and-settle and a short dwell — the trajectory shape
+ *  pointer-dynamics systems expect to see BEFORE a press. Pure planner. */
+export function planHumanApproach({ x, y }, { random = Math.random } = {}) {
+  const angle = random() * Math.PI * 2;
+  const dist = 40 + random() * 90;
+  const sx = x + Math.cos(angle) * dist;
+  const sy = y + Math.sin(angle) * dist;
+  const steps = 3 + Math.floor(random() * 4); // 3–6 moves
+  // Control point: mid-point pushed perpendicular — a curved, not laser-straight path.
+  const mx = (sx + x) / 2, my = (sy + y) / 2;
+  const nx = -(y - sy), ny = x - sx;
+  const nlen = Math.hypot(nx, ny) || 1;
+  const bend = (random() - 0.5) * 2 * (dist * 0.35);
+  const cx = mx + (nx / nlen) * bend, cy = my + (ny / nlen) * bend;
+  // Overshoot 1–3 px past the target on the incoming direction, then settle.
+  const olen = 1 + random() * 2;
+  const ox = x + ((x - cx) / (Math.hypot(x - cx, y - cy) || 1)) * olen;
+  const oy = y + ((y - cy) / (Math.hypot(x - cx, y - cy) || 1)) * olen;
+  const totalMs = 120 + random() * 200;
+  const events = [];
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const ease = 1 - (1 - t) * (1 - t); // ease-out
+    const px = (1 - ease) * (1 - ease) * sx + 2 * (1 - ease) * ease * cx + ease * ease * x;
+    const py = (1 - ease) * (1 - ease) * sy + 2 * (1 - ease) * ease * cy + ease * ease * y;
+    events.push({ x: Math.round(px), y: Math.round(py), dtMs: Math.round((totalMs / steps) * (0.7 + random() * 0.6)) });
+  }
+  events.push({ x: Math.round(ox), y: Math.round(oy), dtMs: 40 + Math.round(random() * 50) }); // overshoot
+  events.push({ x: Math.round(x), y: Math.round(y), dtMs: 30 + Math.round(random() * 40) });   // settle
+  return { events, dwellMs: 40 + Math.round(random() * 90), from: { x: Math.round(sx), y: Math.round(sy) } };
+}
+
+/** Dispatch a trusted click. `human` adds the approach trajectory first —
+ *  for challenge widgets (Turnstile checkbox, puzzle tiles) and other
+ *  pointer-dynamics-sensitive targets. */
+export async function click(ctx, { x, y, button = "left", count = 1, modifiers = 0, human = false }) {
   const b = BUTTON_MAP[button];
   if (!b) throw new AxError(Codes.COMMAND_REJECTED, `button must be left|middle|right, got "${button}"`);
-  await ctx.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", modifiers }, ctx.sessionId);
+  if (human) {
+    const plan = planHumanApproach({ x, y });
+    for (const e of plan.events) {
+      await sleep(e.dtMs);
+      await ctx.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: e.x, y: e.y, button: "none", modifiers }, ctx.sessionId);
+    }
+    await sleep(plan.dwellMs);
+  } else {
+    await ctx.conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", modifiers }, ctx.sessionId);
+  }
   const base = { x, y, button: b, clickCount: count, modifiers };
   await ctx.conn.send("Input.dispatchMouseEvent", { type: "mousePressed", ...base }, ctx.sessionId);
   await ctx.conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...base }, ctx.sessionId);
