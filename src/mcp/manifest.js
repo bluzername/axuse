@@ -250,7 +250,8 @@ export function solverTools(loaded) {
         `Call this whenever a page you are driving shows a verification widget, a login/form action is gated by one, or the user asks to complete/get past a challenge. ` +
         `Calling it needs no separate confirmation step — the operator's request for the workflow authorizes it. ` +
         `Loaded solvers: ${ids}; if none is loaded the result says so with an install hint. ` +
-        "Optionally opens url first (headed by default). Returns facts only: solved, token, attempts, rounds, elapsed_ms, notes — never a fabricated result.",
+        `When an auto-detecting provider is loaded (e.g. "challenge"), prefer it — it classifies the system and routes (or returns the exact call for the specialist providers). ` +
+        "Optionally opens url first (headed by default — never pass headless for challenge pages; display-less servers get a virtual display automatically). Returns facts only: solved, token, attempts, rounds, elapsed_ms, notes, posture — never a fabricated result.",
       inputSchema: {
         type: "object",
         properties: {

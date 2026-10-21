@@ -90,6 +90,7 @@ element refs like `[ref=e7]`. Each action returns only what changed.
 | `AXUSE_LANG` | `--accept-lang` for Chrome — `navigator.language(s)` and the `Accept-Language` header match the egress persona |
 | `AXUSE_PROXY` | route every launched browser through a proxy (`http://`·`socks5://`, credentials supported — answered over CDP); `ax_open {proxy}` sets it per launch |
 | `AXUSE_AMBIENT_MOTION` | `0` disables idle pointer park-fuzz (default: automatic in server mode — the agent's "thinking" pauses still show a live hand) |
+| `AXUSE_MAX_BROWSERS` / `AXUSE_MAX_TABS` | governance caps for massive operations (defaults 8 / 48) — typed failures instead of OOM spirals |
 | `AXUSE_NO_SANDBOX=1` | force `--no-sandbox` (auto for root/container server runs) |
 | `AXUSE_NEUTRALIZE_WEBDRIVER=0` | disable the `navigator.webdriver` posture-fix fallback (the `AutomationControlled` launch flag already fixes it at the source) |
 | `AXUSE_HEADLESS=1` | launch the browser without a window — **trusted internal pages only**: challenge/anti-bot pages detect headless first; servers get server mode instead |

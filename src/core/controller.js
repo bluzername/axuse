@@ -450,6 +450,14 @@ export class Controller {
   }
 
   registerTab(browser, targetId, sessionId, url, openerTabId) {
+    // Governance: bounded tabs per process (AXUSE_MAX_TABS, default 48) —
+    // runaway popup chains must fail typed, not eat the box.
+    const maxTabs = Number(process.env.AXUSE_MAX_TABS ?? 48);
+    if (this.tabs.size >= maxTabs) {
+      throw new AxError(Codes.COMMAND_REJECTED,
+        `Tab cap reached: ${this.tabs.size}/${maxTabs} (AXUSE_MAX_TABS). Close tabs with ax_close before opening more.`,
+        { retry: "retry" });
+    }
     const tabId = `t${++this.tabSeq}`;
     const tab = {
       tabId, browserId: browser.browserId, targetId, sessionId,
@@ -573,9 +581,23 @@ export class Controller {
       this.browserIndex.set(key, browserId);
       return rec;
     }
+    // Governance (massive operations): one process, bounded browsers — an
+    // unbounded fan-out of per-proxy browsers OOM-kills the box instead of
+    // failing typed. AXUSE_MAX_BROWSERS (default 8) caps concurrent
+    // launched browsers; reuse of an existing key is always allowed.
     const key = cdpUrl
       ? `attach:${cdpUrl}`
       : `launch:${headless ? "headless" : "headed"}:${proxy ?? process.env.AXUSE_PROXY ?? "direct"}:${profileDir ?? "ephemeral"}`;
+    const maxBrowsers = Number(process.env.AXUSE_MAX_BROWSERS ?? 8);
+    const existingByKey = this.browserIndex.get(key);
+    if (!cdpUrl && !existingByKey && this.browsers.size >= maxBrowsers
+      && [...this.browsers.values()].some((b) => b.handle.launched)) {
+      const live = [...this.browsers.keys()].join(", ");
+      throw new AxError(Codes.COMMAND_REJECTED,
+        `Browser cap reached: ${this.browsers.size}/${maxBrowsers} launched browsers (AXUSE_MAX_BROWSERS; live: ${live}). `
+        + `Reuse tabs (ax_open opens tabs in the active browser), close one with ax_close {browser:true}, or raise the cap when the box has headroom.`,
+        { retry: "retry" });
+    }
     const existing = this.browserIndex.get(key);
     if (existing) {
       const b = this.browsers.get(existing);

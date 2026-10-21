@@ -28,6 +28,8 @@
     "browser flow": "live-gate-browser: needs any Chromium-family browser (auto-detect or AXUSE_BROWSER)",
     "human input: typing and clicking land as human-shaped trusted events": "live-gate-browser: needs any Chromium-family browser (headless hermetic)",
     "proxy: browser egress": "live-gate-browser: needs any Chromium-family browser (local fixture proxy — no external service)",
+    "posture: the live command": "platform-linux-xvfb: the server-mode audit lane (sudo apt install xvfb + a browser)",
+    "governance: the browser cap": "live-gate-browser: needs any Chromium-family browser (headless hermetic)",
     "fill: ARIA and native sliders via trusted Arrow keys": "live-gate-browser: needs any Chromium-family browser",
     "fill: foreign-tab refs fail with a hint naming the owning tab": "live-gate-browser: needs any Chromium-family browser",
     "mcp: handshake, tools/list, tools/call end-to-end": "live-gate-browser: needs any Chromium-family browser",

@@ -105,6 +105,9 @@ For one-shot / cron-style runs no service is needed — `axuse solve`,
 | `AXUSE_PROXY` | Per-process default for the per-launch `proxy` param: `"http://host:port"`, `"socks5://user:pass@host:port"` — one browser instance per spec, credentials answered over CDP. |
 | `AXUSE_PROXY_BYPASS` | Chrome proxy bypass list override (default: loopback bypassed so local fixtures work; `"<-loopback>"` includes localhost). |
 | `AXUSE_AMBIENT_MOTION` | `0` disables idle pointer park-fuzz; default `auto` = on exactly in server mode. |
+| `AXUSE_MAX_BROWSERS` | Governance cap: concurrent launched browsers per process (default 8) — a per-proxy fan-out fails typed at the cap instead of OOM-killing the box. |
+| `AXUSE_MAX_TABS` | Governance cap: concurrent tabs per process (default 48). |
+| `AXUSE_EGRESS_ECHO_URL` / `AXUSE_EGRESS_GEO_URL` | Endpoints for `axuse posture --verify-egress` (defaults: ipify + ipapi.co; `{ip}` placeholder). |
 | `AXUSE_MANAGED_BROWSER_DIR` | Where `axuse install-browser` puts the pinned Chrome-for-Testing build (default `~/.cache/axuse/browsers`) — mount a cached volume here for fleets. |
 | `AXUSE_NO_SANDBOX` | `1` forces `--no-sandbox`. Auto-applied anyway when running as root (containers) — Chrome refuses root otherwise. |
 | `AXUSE_BROWSER` | Path to the browser binary (as on any host). |
@@ -312,6 +315,29 @@ the smoke test), and asserted by `test/server-mode.test.js`.
   integration point: bring your own egress).
 - **No fabricated results.** Solvers report `solved: false` honestly when
   a page hard-blocks; `doctor` and tests state measured numbers.
+
+## Auditing a fleet (one command, machine-checkable)
+
+`axuse posture` measures the live browser — the same facts the tests pin,
+productized:
+
+```bash
+node src/cli.js posture                      # human report
+node src/cli.js posture --json               # CI/consumers; exit 1 on FAIL
+node src/cli.js posture --verify-egress      # + the exit IP's geo vs AXUSE_TIMEZONE
+```
+
+Checks (fail = exit 1): headed UA, `navigator.webdriver` false **via a
+native getter**, WebGL present, PDF plugin surface; persona coherence
+(clock vs `AXUSE_TIMEZONE`, navigator/Intl vs `AXUSE_LANG`, with the
+`locale-gen` hint when Intl never took); audio fingerprint health. Info
+lines: browser shape (virtual display / egress), fingerprint surface,
+notifications. `--verify-egress` fetches the IP echo **through the
+browser** (through the proxy when configured) and warns when the exit's
+geography contradicts the persona clock — the misconfiguration challenge
+pages would otherwise catch (caught a real one during development: a
+Swiss exit behind an `America/New_York` persona). Echo/geo endpoints are
+configurable (`AXUSE_EGRESS_ECHO_URL`, `AXUSE_EGRESS_GEO_URL`).
 
 ## Verify it (all commands runnable on the server)
 

@@ -35,6 +35,10 @@ Usage:
                                               provision a pinned Chrome for
                                               Testing under ~/.cache/axuse —
                                               no sudo, no apt repo (servers)
+  axuse posture [--json] [--verify-egress]    audit the live browser posture
+                                              (UA, webdriver, WebGL, persona
+                                              coherence, egress geo) — exit 1
+                                              on failing checks (CI-able)
   axuse setup [--browser chrome|edge|chromium|chrome-for-testing]
                                               register bridge + open extension setup
   axuse open-urls <file|url|->                 inspect a URL list and write Markdown
@@ -611,6 +615,26 @@ async function installBrowserCmd() {
   console.log(`managed root: ${MANAGED_ROOT_DEFAULT()} (AXUSE_MANAGED_BROWSER_DIR to relocate — mount a cached volume there for fleets)`);
 }
 
+async function postureCmd() {
+  const json = rest.includes("--json");
+  const verifyEgress = rest.includes("--verify-egress");
+  const { collectPosture, collectEgress, judgePosture, formatPosture } = await import("./workflows/posture.js");
+  const c = new Controller();
+  let report;
+  try {
+    const collected = await collectPosture(c);
+    const egress = verifyEgress ? await collectEgress(c) : null;
+    report = judgePosture({ ...collected, egress }, process.env);
+    const browser = locateBrowser();
+    let ver = "";
+    try { ver = String(spawnSync(browser, ["--version"], { timeout: 15_000, encoding: "utf8" }).stdout ?? "").trim(); } catch {}
+    console.log(formatPosture(report, { json, browser: ver ? `${browser} (${ver})` : browser, egress }));
+    if (report.failures) process.exitCode = 1;
+  } finally {
+    await c.dispose();
+  }
+}
+
 try {
   switch (command) {
     case "mcp":
@@ -630,6 +654,9 @@ try {
       break;
     case "install-browser":
       await installBrowserCmd();
+      break;
+    case "posture":
+      await postureCmd();
       break;
     case "solve":
       await solveCmd();

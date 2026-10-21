@@ -180,3 +180,5 @@ jobs:
         run: node tools/skip-audit.mjs "$RUNNER_TEMP/tap.txt"
       - name: Doctor smoke (server mode: headed Chrome on an auto-booted Xvfb)
         run: env -u DISPLAY node src/cli.js doctor
+      - name: Posture audit (the full lane, machine-checked; exit 1 on failures)
+        run: env -u DISPLAY node src/cli.js posture --json
