@@ -75,6 +75,11 @@ test("real MCP server + real catalog: every capability tool mounts; solve signpo
   for (const slug of ["session", "net", "guard", "grid", "challenge", "auth", "extract", "commerce", "places", "remote-app", "editor", "ats", "enterprise-app", "downloads", "print"]) {
     assert.ok(solve.inputSchema.properties.provider.enum.includes(slug), `provider enum missing ${slug}`);
   }
+  // The persona surface: a solve that launches its own browser launches a
+  // coherent persona (egress + clock + language), not a bare box.
+  for (const p of ["proxy", "timezone", "lang"]) {
+    assert.ok(solve.inputSchema.properties[p], `ax_solve_captcha must accept {${p}}`);
+  }
 
   // A capability solve on the real surface: the honest signpost, typed-free.
   const plugins = await srv.call({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "ax_plugins", arguments: {} } });

@@ -545,6 +545,10 @@ export class Controller {
           cdp_url: a.cdp_url,
           backend: a.backend,
           executable_path: a.executable_path,
+          proxy: a.proxy,
+          proxy_bypass: a.proxy_bypass,
+          timezone: a.timezone,
+          lang: a.lang,
           settle_ms: a.settle_ms,
         });
         const obs = opened.observation ?? {};

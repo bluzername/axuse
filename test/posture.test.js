@@ -217,3 +217,45 @@ test("webrtc: a proxied launch leaks no public ICE candidate (the profile-pref f
   const leak = publicIpCandidates(webrtc.candidates ?? []);
   assert.deepEqual(leak, [], `no public candidate beside the proxied exit (got ${JSON.stringify(leak)})`);
 });
+
+test("open_many: a batch carries one coherent persona (clock + language)", { skip: !hasBrowser ? "live-gate-browser: needs any Chromium-family browser" : false }, async (t) => {
+  const c = new Controller();
+  t.after(() => c.dispose());
+  const batch = await c.execute("open_many", {
+    urls: ["about:blank"],
+    headless: true,
+    timezone: "Asia/Tokyo",
+    lang: "en-GB",
+    close_after: false,
+    settle_ms: 120,
+  });
+  assert.equal(batch.opened, 1);
+  const p = JSON.parse((await c.execute("evaluate", {
+    expression: "({tz: Intl.DateTimeFormat().resolvedOptions().timeZone, lang: navigator.language, intl: Intl.DateTimeFormat().resolvedOptions().locale})",
+  })).value ?? "{}");
+  assert.equal(p.tz, "Asia/Tokyo", "the batch clock matches the persona");
+  assert.equal(p.lang, "en-GB");
+  assert.match(p.intl, /^en[-_]GB/, "Intl follows the persona (LC_ALL derivation)");
+  assert.deepEqual(c.browserPosture().persona, { timezone: "Asia/Tokyo", lang: "en-GB" });
+});
+
+test("the console-getter CDP-attach detector does not fire (measured; pins the docs claim)", { skip: !hasBrowser ? "live-gate-browser: needs any Chromium-family browser" : false }, async (t) => {
+  // The classic detector (console.log of a getter-carrying object) targets
+  // the DevTools UI, not the raw protocol. Measured on Chrome 151 with our
+  // exact attach sequence: the getter is NOT invoked during
+  // consoleAPICalled serialization. This pins the measured fact so the
+  // docs claim cannot silently rot.
+  const c = new Controller();
+  t.after(() => c.dispose());
+  await c.execute("open", { url: "data:text/html,<h1>console detector</h1>", headless: true, settle_ms: 120 });
+  const fired = JSON.parse((await c.execute("evaluate", {
+    expression: `(async () => {
+      let fired = false;
+      const trap = { get x() { fired = true; return 1; } };
+      console.log(trap);
+      await new Promise((r) => setTimeout(r, 300));
+      return fired;
+    })()`,
+  })).value ?? "null");
+  assert.equal(fired, false, "raw CDP console serialization must not invoke getters");
+});

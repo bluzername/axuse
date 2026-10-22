@@ -193,6 +193,12 @@ persona is a different browser (never a mutation of a live one); the same
 persona reuses its browser. Solver results and `axuse posture` report the
 instance persona.
 
+The persona params ride on **every surface that launches a browser**:
+`ax_solve_captcha {url, proxy, timezone, lang}` (a solve that opens its own
+page opens it as a coherent persona), `ax_open_many {proxy, timezone, lang}`
+(one persona for a whole scraping batch), and the CLI
+(`axuse solve --proxy --timezone --lang`).
+
 ## WebRTC: the leak beside proxied personas (measured, then closed)
 
 With a proxy, HTTP leaves through the exit — but WebRTC STUN/srflx
@@ -340,6 +346,14 @@ the smoke test), and asserted by `test/server-mode.test.js`.
   integration point: bring your own egress).
 - **No fabricated results.** Solvers report `solved: false` honestly when
   a page hard-blocks; `doctor` and tests state measured numbers.
+- **Measured, not assumed, on the CDP surface**: the classic console-getter
+  DevTools detector (logging a getter-carrying object) does **not** fire
+  against raw CDP — `Runtime.consoleAPICalled` serialization never invokes
+  getters (measured on Chrome 151 with axuse's exact attach sequence; the
+  detector targets the DevTools UI, not the protocol). `Runtime.evaluate`
+  also works without `Runtime.enable` — ours is kept only for the
+  console-error ring (a debugging fact agents can act on), costing nothing
+  measurable. Both facts are pinned by live tests.
 
 ## Auditing a fleet (one command, machine-checkable)
 

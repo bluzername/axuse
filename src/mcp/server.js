@@ -128,10 +128,16 @@ export async function createServer({ controller = new Controller(), desktop, sol
       }
       // ax_solve_captcha: optionally open the url, then dispatch to the
       // loaded solver through the narrow ctx — never the raw controller.
+      // Persona params (proxy/timezone/lang) ride along: a solve that
+      // launches its own browser launches a coherent persona, not a bare box.
       if (typeof args.url === "string") {
         await controller.execute("open", {
           url: args.url,
           ...(args.headless ? { headless: true } : {}),
+          ...(args.proxy ? { proxy: args.proxy } : {}),
+          ...(args.proxy_bypass ? { proxy_bypass: args.proxy_bypass } : {}),
+          ...(args.timezone ? { timezone: args.timezone } : {}),
+          ...(args.lang ? { lang: args.lang } : {}),
           settle_ms: 4000,
         });
       }

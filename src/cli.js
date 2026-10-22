@@ -45,6 +45,8 @@ Usage:
   axuse plugins                               list loaded solver plugins
   axuse solve <provider> [--url URL]          run a loaded solver (e.g. turnstile)
                                               [--headless] [--max-attempts N] [--deadline-ms N]
+                                              [--proxy http://u:p@host:port] [--timezone IANA]
+                                              [--lang en-GB]                              per-instance persona
   axuse bridge                                run the bridge hub standalone
   axuse bridge install [--browser chrome|edge|chromium|chrome-for-testing]
                                               register the native host for the extension
@@ -257,6 +259,10 @@ async function solveCmd() {
       await controller.execute("open", {
         url: arg("--url"),
         ...(hasFlag("--headless") ? { headless: true } : {}),
+        ...(arg("--proxy") ? { proxy: arg("--proxy") } : {}),
+        ...(arg("--proxy-bypass") ? { proxy_bypass: arg("--proxy-bypass") } : {}),
+        ...(arg("--timezone") ? { timezone: arg("--timezone") } : {}),
+        ...(arg("--lang") ? { lang: arg("--lang") } : {}),
         settle_ms: 4000,
       });
     }
