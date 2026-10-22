@@ -374,6 +374,30 @@ test("server mode: ambient pointer park-fuzz moves the pointer while the agent i
   assert.equal(n1, n0, "AXUSE_AMBIENT_MOTION=0 parks the pointer");
 });
 
+test("server mode: Xvfb death mid-session → typed failure, then full regeneration on the next open", { skip: liveSkip }, async (t) => {
+  const restore = withDeadDisplay();
+  t.after(restore);
+  const c = new Controller();
+  t.after(() => c.dispose());
+  const first = await c.execute("open", { url: "about:blank", settle_ms: 150 });
+  assert.equal(first.display?.virtual, true);
+  const firstDisplay = first.display.id;
+  // The X server dies (OOM, operator cleanup — whatever kills it).
+  __resetVirtualDisplay();
+  // The live browser on the dead display fails typed (broken windows);
+  // the process keeps the stale DISPLAY value — displayUsable must catch
+  // the gone socket and server mode must regenerate on the next open.
+  await assert.rejects(
+    () => c.execute("evaluate", { expression: "1 + 1" }),
+    (e) => typeof e.code === "string",
+  );
+  const second = await c.execute("open", { url: "data:text/html,<h1>regenerated</h1>", settle_ms: 200 });
+  assert.equal(second.display?.virtual, true, "a fresh virtual display booted after the death");
+  assert.ok(second.observation.text.includes("regenerated"));
+  const vd = virtualDisplayStatus();
+  assert.ok(vd.active && firstDisplay, "the singleton is live again");
+});
+
 test("server mode: AXUSE_HEADLESS=1 lane still opens headless on a dead display", { skip: liveSkip }, async (t) => {
   const restore = withDeadDisplay();
   t.after(restore);

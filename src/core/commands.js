@@ -122,6 +122,7 @@ export const Contract = Object.freeze({
     params: {
       fields: { t: "fields", req: true, desc: '[{"ref":"e3","value":"Ada"},{"ref":"e6","value":true}]' },
       submit: { t: "string", desc: "Ref to click after filling." },
+      human: { t: "boolean", desc: "Human input lane for text fields: human focus clicks + per-key trusted typing with human cadence — for login/credential forms on pages where keystroke dynamics are sampled; default is fast bulk insert." },
       state_id: STATE, tab_id: TAB, settle_ms: { t: "number", desc: "Default 200." },
     },
     observed: "diff",

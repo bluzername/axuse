@@ -125,6 +125,44 @@ test("human input: typing and clicking land as human-shaped trusted events", { s
   assert.ok(m[pressIdx + 1].n === "mouseup", "press → release");
 });
 
+test("human fill: ax_fill {human:true} focuses and types humanly into every field", { skip: !hasBrowser ? "live-gate-browser: needs any Chromium-family browser" : false }, async (t) => {
+  const c = new Controller();
+  t.after(() => c.dispose());
+  const html = `data:text/html,<form>
+    <input id="u" aria-label="user"><input id="p" type="password" aria-label="pass">
+    <script>
+      window.__k = [];
+      for (const id of ["u", "p"]) {
+        const el = document.getElementById(id);
+        ["keydown", "input"].forEach((n) => el.addEventListener(n, (e) =>
+          window.__k.push({ id, n, key: e.key, code: e.code || null, ctrl: e.ctrlKey, trusted: e.isTrusted })));
+      }
+    </script></form>`;
+  const opened = await c.execute("open", { url: html, headless: true, settle_ms: 150 });
+  const refs = {};
+  for (const m of opened.observation.text.matchAll(/textbox "(\w+)"[^\[]*\[ref=(e\d+)\]/g)) refs[m[1]] = m[2];
+  assert.ok(refs.user && refs.pass, `both fields have refs: ${JSON.stringify(refs)}`);
+  const t0 = Date.now();
+  const filled = await c.execute("fill", {
+    fields: [{ ref: refs.user, value: "ada" }, { ref: refs.pass, value: "s3cret" }],
+    human: true,
+    settle_ms: 120,
+  });
+  assert.equal(filled.action_sent, "sent");
+  const keys = JSON.parse((await c.execute("evaluate", { expression: "window.__k" })).value ?? "[]");
+  // per-char pairs in EACH field (the select-all Ctrl+A pairs are excluded
+  // by the ctrl flag — they are the command's, not the typing's).
+  const downs = keys.filter((k) => k.n === "keydown" && !k.ctrl && k.key.length === 1);
+  // per-char pairs in EACH field (select-all combos add Ctrl/A pairs, excluded here)
+  assert.equal(downs.filter((k) => k.id === "u").length, 3, "3 keydowns in the user field");
+  assert.equal(downs.filter((k) => k.id === "p").length, 6, "6 keydowns in the pass field");
+  assert.ok(keys.every((k) => k.trusted), "every event trusted");
+  assert.deepEqual(keys.filter((k) => k.id === "u" && k.n === "input").length, [3][0]);
+  assert.ok(Date.now() - t0 >= (3 + 6) * 45, `human pace across both fields (${Date.now() - t0}ms)`);
+  const vals = JSON.parse((await c.execute("evaluate", { expression: "({u: document.getElementById('u').value, p: document.getElementById('p').value})" })).value ?? "{}");
+  assert.deepEqual(vals, { u: "ada", p: "s3cret" });
+});
+
 test("proxy: browser egress routes through a credentialed local proxy (407 → CDP auth)", { skip: !hasBrowser ? "live-gate-browser: needs any Chromium-family browser" : false }, async (t) => {
   // Plain origin server (the "site").
   const site = http.createServer((req, res) => {

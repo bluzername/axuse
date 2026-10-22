@@ -182,3 +182,5 @@ jobs:
         run: env -u DISPLAY node src/cli.js doctor
       - name: Posture audit (the full lane, machine-checked; exit 1 on failures)
         run: env -u DISPLAY node src/cli.js posture --json
+      - name: Posture egress verification (the exit IP's geo vs the persona; INFO-safe on network gaps)
+        run: env -u DISPLAY node src/cli.js posture --verify-egress | tail -4

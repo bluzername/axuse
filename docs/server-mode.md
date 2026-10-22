@@ -172,6 +172,10 @@ plugins where it matters:
   per char, 45–160 ms gaps, 6% thinking pauses, word-boundary slowdowns)
   with real layout key codes — for login/challenge fields where keystroke
   dynamics are sampled. Solver context: `ctx.type({..., human: true})`.
+- **`ax_fill {human: true}`** — the human lane for WHOLE FORMS (the login
+  flow itself): every field gets a human focus click + per-key typing;
+  checkboxes/selects/sliders keep their trusted-input paths. Live-tested
+  across a two-field credential form.
 - **Sliders/interstitials** already move humanly (the challenge-handler's
   bezier trajectory engine with ≥8 velocity maxima and sub-8 ms jitter).
 - **Ambient park-fuzz** (server mode default, `AXUSE_AMBIENT_MOTION=0`
@@ -346,6 +350,13 @@ the smoke test), and asserted by `test/server-mode.test.js`.
   integration point: bring your own egress).
 - **No fabricated results.** Solvers report `solved: false` honestly when
   a page hard-blocks; `doctor` and tests state measured numbers.
+- **A dead exit falls back to direct.** If the proxy dies mid-session,
+  Chrome silently retries traffic DIRECT — the persona leaks at the IP
+  layer until the next launch (the WebRTC fix holds; HTTP does not). No
+  Chrome flag disables proxy fallback. Fleet practice: health-check exits
+  on a schedule (`axuse posture --verify-egress` reports the live exit IP)
+  and restart the lane when an exit dies — the persona is re-established
+  on the next browser launch.
 - **Measured, not assumed, on the CDP surface**: the classic console-getter
   DevTools detector (logging a getter-carrying object) does **not** fire
   against raw CDP — `Runtime.consoleAPICalled` serialization never invokes

@@ -158,11 +158,18 @@ test("mcp: handshake, tools/list, tools/call end-to-end", { skip: !hasBrowser },
   assert.match(openText, /button "go"/);
 
   const ref = openText.match(/button "go"[^\[]*\[ref=(e\d+)\]/)[1];
-  const clicked = await srv.call({
-    jsonrpc: "2.0", id: 4, method: "tools/call",
-    params: { name: "ax_click", arguments: { target: { ref }, settle_ms: 150 } },
-  });
-  const clickText = clicked.result.content[0].text;
+  // Under parallel-suite load, a data: URL page can wire its onclick AFTER
+  // the first click (the product's own no-change note says one retry is
+  // reasonable) — click up to twice and accept the first observable change.
+  let clickText = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const clicked = await srv.call({
+      jsonrpc: "2.0", id: 4, method: "tools/call",
+      params: { name: "ax_click", arguments: { target: { ref }, settle_ms: attempt ? 300 : 150 } },
+    });
+    clickText = clicked.result.content[0].text;
+    if (/text "done"|changed/.test(clickText)) break;
+  }
   assert.doesNotMatch(clickText, /^action: /); // "sent" is the silent default
   assert.match(clickText, /text "done"|changed/);
 

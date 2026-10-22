@@ -1168,7 +1168,7 @@ export class Controller {
     };
     const clickRef = async (r) => {
       const pos = await this.resolveTarget(tab, { ref: r });
-      await this.doSent(tab, () => doClick(this.ctx(tab, pos.session), { x: pos.x, y: pos.y, button: "left", count: 1, modifiers: 0 }));
+      await this.doSent(tab, () => doClick(this.ctx(tab, pos.session), { x: pos.x, y: pos.y, button: "left", count: 1, modifiers: 0, human: !!a.human }));
     };
     for (const [i, f] of a.fields.entries()) {
       if (tab.dialog) fail(i, f, `was not filled: a ${tab.dialog.type} dialog opened`);
@@ -1203,7 +1203,14 @@ export class Controller {
         await clickRef(f.ref);
         const ctx = this.ctx(tab, session);
         await this.doSent(tab, () => pressCombo(ctx, selectAllCombo()));
-        await this.doSent(tab, () => insertText(ctx, String(f.value)));
+        // human: per-key trusted events with human cadence — the lane for
+        // login/credential forms on protected pages (keystroke-dynamics
+        // sampling); the default stays the fast bulk insert.
+        if (a.human) {
+          await this.doSent(tab, () => humanType(ctx, String(f.value)));
+        } else {
+          await this.doSent(tab, () => insertText(ctx, String(f.value)));
+        }
         if (info.kind === "combo") {
           // Autocomplete: wait for suggestions, pick the exact match.
           let opt = null;
