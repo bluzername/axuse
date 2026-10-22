@@ -387,7 +387,15 @@ browser** (through the proxy when configured) and warns when the exit's
 geography contradicts the persona clock — the misconfiguration challenge
 pages would otherwise catch (caught a real one during development: a
 Swiss exit behind an `America/New_York` persona). Echo/geo endpoints are
-configurable (`AXUSE_EGRESS_ECHO_URL`, `AXUSE_EGRESS_GEO_URL`).
+configurable (`AXUSE_EGRESS_ECHO_URL`, `AXUSE_EGRESS_GEO_URL`). The CI
+`linux-server` lane pins the detector itself: a deliberately mismatched
+persona (Tokyo clock through the runner's US exit) must produce the
+warning whenever the geo service answers.
+
+`doctor` also reports **browser currency** (best-effort, INFO on offline
+hosts): the running major vs the current CfT stable — a persona several
+majors behind is its own signal (distro Chrome drifts with
+unattended-upgrades; `install-browser --version` pins deliberately).
 
 ## Verify it (all commands runnable on the server)
 

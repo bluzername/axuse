@@ -329,6 +329,23 @@ async function doctor() {
       const mv = managedVersion();
       if (mv) out(`managed browser: ${mv} at ${MANAGED_ROOT_DEFAULT()} (axuse install-browser --version ${mv} pins a fleet)`);
     }
+    // Best-effort drift visibility (network INFO, never a failure): what the
+    // current CfT stable channel is vs what this box runs. A persona on a
+    // browser several majors behind is its own signal; pinned fleets
+    // (install-browser --version) upgrade deliberately.
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 3500);
+      const res = await fetch("https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json", { signal: ctrl.signal });
+      clearTimeout(t);
+      const j = await res.json();
+      const latest = j?.channels?.Stable?.version;
+      if (latest && ver) {
+        const major = (s) => Number(/(\d+)\./.exec(s)?.[1] ?? 0);
+        const drift = major(ver) && major(latest) ? major(latest) - major(ver) : null;
+        out(`browser currency: running ${major(ver) || "?"}, CfT stable ${major(latest) || "?"}${drift !== null && drift > 0 ? ` — ${drift} major(s) behind (managed installs pin deliberately; distro Chrome drifts with unattended-upgrades)` : ""}`);
+      }
+    } catch { /* offline or slow: currency is INFO, never a failure */ }
   } else {
     out("browser: not found — run `axuse install-browser` (pins Chrome for Testing under ~/.cache — no sudo), or install distro Chrome, or set AXUSE_BROWSER");
   }

@@ -184,3 +184,15 @@ jobs:
         run: env -u DISPLAY node src/cli.js posture --json
       - name: Posture egress verification (the exit IP's geo vs the persona; INFO-safe on network gaps)
         run: env -u DISPLAY node src/cli.js posture --verify-egress | tail -4
+      - name: Egress mismatch detector (a Tokyo persona through a US runner exit must WARN)
+        run: |
+          set -euo pipefail
+          env -u DISPLAY AXUSE_TIMEZONE=Asia/Tokyo node src/cli.js posture --verify-egress > /tmp/posture-mismatch.txt || true
+          # The check MUST run: either the mismatch warning (geo answered)
+          # or the honest unreachable/info line (network gap). Never silent.
+          grep -qE "egress: (exit IP|echo unreachable)" /tmp/posture-mismatch.txt
+          # When geo answers (the common case), the mismatch must be CALLED OUT.
+          if grep -q "exit IP" /tmp/posture-mismatch.txt; then
+            grep -q "does not match the exit" /tmp/posture-mismatch.txt
+            echo "detector fired:" $(grep "does not match the exit" /tmp/posture-mismatch.txt)
+          fi
