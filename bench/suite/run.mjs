@@ -9,6 +9,8 @@
  *   axuse         axuse MCP server (its own headless Chromium)
  *   browser-use   browser-use 0.13 CLI + its official SKILL.md (dedicated
  *                 headless Chromium via BU_CDP_URL)
+ *   playwright    Microsoft's @playwright/mcp (pinned, --playwright-cli) driving
+ *                 the same headless Chrome build, isolated profile
  *
  * Fixtures are served over public HTTPS (Cloudflare quick tunnels) because the
  * Codex extension refuses localhost / private IPs. Success is scored on
@@ -31,6 +33,12 @@ import { locateBrowser } from "../../src/core/cdp.js";
 const AXUSE_DIR = process.env.AXBENCH_AXUSE_DIR ?? join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORK = process.env.AXBENCH_WORK ?? join(homedir(), ".axbench-tmp");
 const SESSIONS_ROOT = join(homedir(), ".codex", "sessions");
+// --codex-home <dir>: run every arm except codex-chrome in an isolated Codex
+// home (same login, no bundled browser/computer-use plugins). The feature and
+// plugin --disable flags do not remove Codex's built-in `cua`/node_repl REPL
+// servers, so an arm could still reach another browser layer; a clean home
+// takes them away for every arm identically.
+const ISO_HOME = (() => { const i = process.argv.indexOf("--codex-home"); return i >= 0 ? process.argv[i + 1] : null; })();
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 ? process.argv[i + 1] : d; };
 const MODEL = arg("--model", "gpt-5.6-luna");
 const EFFORT = arg("--effort", "medium");
@@ -113,9 +121,15 @@ const DISABLE_NATIVE = [
   "-c", 'plugins."unified-computer-use@openai-bundled".enabled=false', "-c", 'plugins."computer-use@openai-bundled".enabled=false',
 ];
 const NO_AXUSE = ["-c", "mcp_servers.axuse.enabled=false"];
+// An isolated Codex home has no axuse entry to disable, and disabling an
+// undefined server is an invalid config (Codex refuses to start).
+const NO_AXUSE_ISO = ISO_HOME ? [] : NO_AXUSE;
 // The axuse arm runs a FROZEN copy (--axuse-cli), so edits to the working
 // tree can never leak into a benchmark in flight.
 const AXUSE_CLI = arg("--axuse-cli", null);
+// The playwright arm runs a pinned local install of @playwright/mcp (cli.js).
+const PW_CLI = arg("--playwright-cli", null);
+const PW_FLAGS = PW_CLI ? ["-c", `mcp_servers.playwright.command="node"`, "-c", `mcp_servers.playwright.args=["${PW_CLI.replaceAll("\\", "/")}","--headless","--isolated","--caps","vision","--executable-path","${locateBrowser().replaceAll("\\", "/")}"]`] : [];
 const AXUSE_FLAGS = AXUSE_CLI ? ["-c", `mcp_servers.axuse.command="node"`, "-c", `mcp_servers.axuse.args=["${AXUSE_CLI.replaceAll("\\", "/")}","mcp"]`] : [];
 
 const COMMON_RULES =
@@ -139,8 +153,15 @@ const ARM = {
     evidence: (calls) => calls.some((c) => /ax_/.test(c.name) || /mcp__axuse__ax_/.test(c.args)),
     foreign: (calls) => calls.some((c) => (c.name === "js" && /cua\.|tabs\.new|playwright/.test(c.args)) || /browser-use/.test(c.args)),
   },
+  playwright: {
+    flags: [...DISABLE_NATIVE, ...NO_AXUSE_ISO, ...PW_FLAGS],
+    env: {},
+    directive: () => "Use the Playwright MCP browser tools (browser_navigate, browser_snapshot, browser_click, …) for this task. They launch their own browser.\n",
+    evidence: (calls) => calls.some((c) => /mcp__playwright__browser_/.test(c.args) || /playwright/.test(c.name)),
+    foreign: (calls) => calls.some((c) => /^ax_|mcp__axuse/.test(c.name) || /mcp__axuse|browser-use/.test(c.args) || (c.name === "js" && /cua\.|tabs\.new/.test(c.args))),
+  },
   "browser-use": {
-    flags: [...DISABLE_NATIVE, ...NO_AXUSE],
+    flags: [...DISABLE_NATIVE, ...NO_AXUSE_ISO],
     env: {},
     directive: () =>
       "Use the browser-use CLI (`browser-use`, already installed and on PATH) for this task. A dedicated Chrome is already running and configured via BU_CDP_URL. " +
@@ -155,7 +176,7 @@ function runCodex(armName, prompt, cwd, extraEnv) {
   const args = ["exec", "-s", "danger-full-access", "--skip-git-repo-check", "-m", MODEL, "-c", `model_reasoning_effort="${EFFORT}"`, ...arm.flags, prompt];
   return new Promise((resolve) => {
     const t0 = Date.now();
-    const child = spawn("codex", args, { cwd, env: { ...process.env, ...arm.env, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("codex", args, { cwd, env: { ...process.env, ...arm.env, ...extraEnv, ...(ISO_HOME && armName !== "codex-chrome" ? { CODEX_HOME: ISO_HOME } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
@@ -170,6 +191,7 @@ function findSession(sessionId) {
   const hits = [];
   const walk = (d) => { let es; try { es = readdirSync(d, { withFileTypes: true }); } catch { return; } for (const e of es) { const p = join(d, e.name); if (e.isDirectory()) walk(p); else if (e.name.includes(sessionId)) hits.push(p); } };
   walk(SESSIONS_ROOT);
+  if (ISO_HOME) walk(join(ISO_HOME, "sessions"));
   return hits[0] ?? null;
 }
 const outText = (p) => typeof p.output === "string" ? p.output : Array.isArray(p.output) ? p.output.map((x) => x.text ?? "").join("") : "";
@@ -219,6 +241,7 @@ function violations(calls, hosts) {
 
 // ------------------------------------------------------------------ main
 async function main() {
+  if (ARMS.includes("playwright") && !PW_CLI) throw new Error("playwright arm needs --playwright-cli <path to @playwright/mcp/cli.js>");
   if (ARMS.includes("browser-use") && !BU_SKILL) throw new Error("bench/suite/browser-use-SKILL.md missing (run: browser-use skill show > that file)");
   const suite = await startSuite();
   const [tp, tc] = await Promise.all([startTunnel(suite.parentPort), startTunnel(suite.childPort)]);
@@ -275,7 +298,7 @@ async function main() {
     };
     appendFileSync(OUT, JSON.stringify(rec) + "\n");
     const tok = s.tokens ? `${s.tokens.total_tokens?.toLocaleString()} (in ${s.tokens.input_tokens?.toLocaleString()}, cached ${s.tokens.cached_input_tokens?.toLocaleString()}, out ${s.tokens.output_tokens?.toLocaleString()})` : "?";
-    console.log(`${success ? "PASS" : "FAIL"} ${task.padEnd(4)} ${armName.padEnd(12)} r${rep} ${String(Math.round(r.wallMs / 1000)).padStart(4)}s turns=${s.turns} calls=${s.calls.length} tok=${tok}${viol.length ? " VIOLATION" : ""}${!evidence ? " NO-EVIDENCE" : ""}${foreign ? " FOREIGN" : ""}${!scored ? ` [answer="${answer.slice(0, 40)}"]` : ""}`);
+    console.log(`${success ? "PASS" : "FAIL"} ${task.padEnd(4)} ${armName.padEnd(12)} r${rep} ${String(Math.round(r.wallMs / 1000)).padStart(4)}s turns=${s.turns} calls=${s.calls.length} tok=${tok}${viol.length ? " VIOLATION" : ""}${!evidence ? " NO-EVIDENCE" : ""}${foreign ? " FOREIGN" : ""}${!scored ? ` [answer="${answer.slice(0, 40)}"]` : ""}${!file ? ` NO-SESSION [codex: ${String(r.stderr).trim().split("\n").slice(-1)[0].slice(0, 160)}]` : ""}`);
     try { rmSync(cwd, { recursive: true, force: true }); } catch {}
     return rec;
   };

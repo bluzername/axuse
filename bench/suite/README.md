@@ -10,6 +10,7 @@ layer:
 | `codex-chrome` | Codex's own browser use: the Codex Chrome extension in the user's real Chrome (Codex's built-in plugin + skill) |
 | `axuse` | the axuse MCP server (its own headless Chromium) |
 | `browser-use` | [browser-use](https://github.com/browser-use/browser-use) 0.13 CLI + its official `SKILL.md`, attached to a dedicated headless Chrome via `BU_CDP_URL` |
+| `playwright` | Microsoft's [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp) (pinned local install via `--playwright-cli`), headless Chrome, isolated profile, `--caps vision` |
 
 ## Tasks
 
@@ -90,3 +91,24 @@ node bench/suite/portability.mjs --harness claude,opencode
 
 Results land in `results/*.jsonl` (one line per run, with the session file
 path for audit).
+
+### Comparing against another MCP browser tool, in a clean agent home
+
+```bash
+# pinned Playwright MCP, installed once
+mkdir -p ~/.axbench-tmp/pw-mcp && (cd ~/.axbench-tmp/pw-mcp && npm init -y && npm i @playwright/mcp@0.0.83)
+
+# a Codex home with the same login but none of Codex's bundled browser /
+# computer-use plugins (the --disable flags do not remove its built-in `cua`
+# and `node_repl` servers, so without this an arm can still reach another layer)
+mkdir -p ~/.axbench-tmp/codex-home && cp ~/.codex/auth.json ~/.axbench-tmp/codex-home/ && : > ~/.axbench-tmp/codex-home/config.toml
+
+node bench/suite/run.mjs --arms axuse,playwright --reps 3 --tag compare   --codex-home ~/.axbench-tmp/codex-home   --axuse-cli /path/to/axuse-frozen/src/cli.js   --playwright-cli ~/.axbench-tmp/pw-mcp/node_modules/@playwright/mcp/cli.js
+node bench/suite/summarize.mjs bench/suite/results/compare.jsonl
+node bench/suite/rescore.mjs bench/suite/results/compare.jsonl   # strict vs "touched the task site" rule
+```
+
+`auth.json` holds your login: delete the benchmark home when you are done. A run
+that produces no agent session prints the agent's own error (`NO-SESSION`) instead of
+a bare FAIL. The result of one such comparison, with its caveats, is in
+`PLAYWRIGHT-COMPARISON.md`.
