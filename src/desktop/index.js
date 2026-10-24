@@ -139,7 +139,10 @@ class WindowsDriver {
   /* ------------------------------------------------------------ operations */
 
   async screenInfo() {
-    return this.check(this.op({ op: "screen_info" }));
+    const info = await this.check(this.op({ op: "screen_info" }));
+    // Same field the Linux and macOS drivers report: the agent is told which
+    // units x/y/w/h (and every click) are in. The script returns physical px.
+    return { ...info, coordinate_space: "Windows virtual-screen physical pixels (spans all monitors; x,y is the top-left)" };
   }
 
   async screenshot({ x, y, w, h, budgetBytes = DEFAULT_BUDGET_BYTES, quality = 80 } = {}) {

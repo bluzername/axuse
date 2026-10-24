@@ -29,6 +29,10 @@ test("browser candidates cover preview channels (beta/canary) per platform", () 
     // Unpinned discovery tries preview channels after stable + CfT.
     assert.ok(all.findIndex((p) => /Chrome Beta\.app/.test(p)) > all.findIndex((p) => /Chrome for Testing\.app/.test(p)),
       "preview channels rank AFTER the stable automation builds");
+  } else if (process.platform === "win32") {
+    // Windows installs Beta under "Chrome Beta" and Canary under "Chrome SxS".
+    assert.ok(browserCandidates({ browser: "chrome-beta", ignoreEnv: true }).some((p) => /Google\\Chrome Beta\\Application\\chrome\.exe$/.test(p)));
+    assert.ok(browserCandidates({ browser: "chrome-canary", ignoreEnv: true }).some((p) => /Google\\Chrome SxS\\Application\\chrome\.exe$/.test(p)));
   } else {
     assert.ok(browserCandidates({ browser: "chrome-beta", ignoreEnv: true }).some((p) => /chrome-beta/i.test(p)));
   }

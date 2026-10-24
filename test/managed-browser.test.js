@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { deflateRawSync } from "node:zlib";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { unzip } from "../src/core/zip.js";
 import { managedBinary, managedBrowserCandidates, managedVersion, resolveDownload } from "../src/core/managed-browser.js";
 import { browserCandidates } from "../src/core/cdp.js";
@@ -106,8 +106,10 @@ test("zip: STORE and DEFLATE entries extract byte-exact, dirs created, exec bits
     assert.deepEqual(readFileSync(join(dir, "chrome-linux64/chrome")), binary);
     assert.equal(readFileSync(join(dir, "chrome-linux64/notes.txt"), "utf8"), "hello zip");
     assert.equal(readFileSync(join(dir, "chrome-linux64/sub/deep.txt"), "utf8"), "nested");
-    assert.equal(statSync(join(dir, "chrome-linux64/chrome")).mode & 0o777, 0o755, "exec bit restored from external attrs");
-    assert.equal(statSync(join(dir, "chrome-linux64/sub/deep.txt")).mode & 0o777, 0o600);
+    if (process.platform !== "win32") { // NTFS has no POSIX permission bits to restore
+      assert.equal(statSync(join(dir, "chrome-linux64/chrome")).mode & 0o777, 0o755, "exec bit restored from external attrs");
+      assert.equal(statSync(join(dir, "chrome-linux64/sub/deep.txt")).mode & 0o777, 0o600);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -183,9 +185,13 @@ test("managed browser: install promotes, stamps, lands executable; second run sh
   const root = mkdtempSync(join(tmpdir(), "axuse-install-"));
   process.env.AXUSE_MANAGED_BROWSER_DIR = root;
   try {
+    // The archive layout is whatever this platform's managed binary path says
+    // (chrome-linux64/chrome, chrome-win64/chrome.exe, the macOS .app bundle).
+    const binRel = relative(root, managedBinary(root)).split(sep).join("/");
+    const top = binRel.split("/")[0];
     const archive = buildZip([
-      { name: "chrome-linux64/chrome", data: Buffer.from("#!/bin/sh\n"), mode: 0o755 },
-      { name: "chrome-linux64/priv.json", data: Buffer.from("{}") },
+      { name: binRel, data: Buffer.from("#!/bin/sh\n"), mode: 0o755 },
+      { name: `${top}/priv.json`, data: Buffer.from("{}") },
     ]);
     const resolve = async () => ({ url: "injected://cft.zip", version: "151.0.0.1", platform: "linux64" });
     const fetchZip = async () => archive;
@@ -195,7 +201,8 @@ test("managed browser: install promotes, stamps, lands executable; second run sh
     assert.equal(r.files, 2);
     const bin = managedBinary(root);
     assert.equal(r.binary, bin);
-    assert.equal(statSync(bin).mode & 0o111, 0o111, "executable after promote");
+    if (process.platform === "win32") assert.ok(statSync(bin).isFile(), "binary landed (NTFS has no exec bit)");
+    else assert.equal(statSync(bin).mode & 0o111, 0o111, "executable after promote");
     assert.equal(managedVersion(root), "151.0.0.1");
     // Same version again → no re-download (fetchZip would throw if called).
     const again = await installManagedBrowser({ resolve, fetchZip: async () => { throw new Error("must not download"); } });

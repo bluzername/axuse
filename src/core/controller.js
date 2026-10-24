@@ -527,6 +527,7 @@ export class Controller {
     let tab;
     try {
       tab = this.registerTab(browser, targetId, sessionId, "about:blank");
+      await this.applyPersonaTimezone(tab);
       await this.ensureVisible(tab).catch(() => null);
       await this.navigateInTab(tab, url, a.settle_ms ?? 300);
     } catch (e) {
@@ -708,8 +709,9 @@ export class Controller {
         if (ti?.type !== "page" || !ti.openerId) return;
         const opener = [...this.tabs.values()].find((t) => t.targetId === ti.openerId && t.browserId === rec.browserId);
         if (!opener || [...this.tabs.values()].some((t) => t.targetId === ti.targetId)) return;
-        const p = rec.handle.attachTab(ti.targetId).then(({ sessionId }) => {
+        const p = rec.handle.attachTab(ti.targetId).then(async ({ sessionId }) => {
           const tab = this.registerTab(rec, ti.targetId, sessionId, ti.url || "about:blank", opener.tabId);
+          await this.applyPersonaTimezone(tab);
           this.recordEvent(opener, "tab.opened", { tab_id: tab.tabId, url: ti.url });
           rec.adopted.push(tab.tabId);
           return tab;
@@ -889,6 +891,18 @@ export class Controller {
     tab.offEventRouting = off;
   }
 
+  /** Persona timezone on Windows. The launch sets TZ for the browser process,
+   *  which Linux and macOS Chrome honor but Windows Chrome ignores, so a Tokyo
+   *  persona silently kept the machine's clock. CDP's timezone override is the
+   *  cross-platform lever; it is applied where TZ is ineffective, before the
+   *  tab's first navigation (and on every adopted popup / OOPIF frame). */
+  async applyPersonaTimezone(tab, sessionId = tab.sessionId) {
+    if (process.platform !== "win32") return;
+    const timezoneId = tab.browser?.persona?.timezone ?? tab.browser?.handle?.persona?.timezone;
+    if (!timezoneId) return;
+    try { await tab.browser.handle.conn.send("Emulation.setTimezoneOverride", { timezoneId }, sessionId); } catch { /* invalid zone ids already fail the launch check */ }
+  }
+
   /** In-flight XHR/fetch/document tracking for post-action settling. Passive:
    *  nothing is injected into the page, only CDP Network events are counted.
    *  AXUSE_NET_SETTLE=0 turns it off (then settling is timing-only). */
@@ -964,6 +978,7 @@ export class Controller {
       await conn.send("Page.enable", {}, sessionId);
       await conn.send("Runtime.enable", {}, sessionId);
       await conn.send("Log.enable", {}, sessionId);
+      await this.applyPersonaTimezone(tab, sessionId);
       // Nested cross-origin frames auto-attach within the frame session too.
       await conn.send("Target.setAutoAttach",
         { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId);

@@ -56,8 +56,9 @@ test("server mode: DISPLAY parsing and dead-display detection", () => {
   // on hosts that carry a stale value (closed SSH forward, dead CI :99).
   assert.equal(displayUsable(":65530"), false); // no such X socket, ever
   // Injectable exists seam: a "socket" for :42 → usable
-  assert.equal(displayUsable(":42", { exists: (p) => /\/X42$/.test(p) }), true);
-  assert.equal(displayUsable(":43", { exists: (p) => /\/X42$/.test(p) }), false);
+  // (the socket path uses the platform's separator, so match either)
+  assert.equal(displayUsable(":42", { exists: (p) => /[\\/]X42$/.test(p) }), true);
+  assert.equal(displayUsable(":43", { exists: (p) => /[\\/]X42$/.test(p) }), false);
 });
 
 test("server mode: the launch decision matrix is pure and typed", () => {
