@@ -473,6 +473,28 @@ export function settleExpression(budgetMs, debounceMs) {
   })()`;
 }
 
+/** In-page wait for the FIRST DOM mutation (then a short quiet window), bounded
+ *  by maxMs. Resolves true when the page changed, false when it stayed still.
+ *  Attached after the action, so it only ever sees LATE changes (a delayed
+ *  render, a debounced handler) — the case a 150 ms settle reports as "no
+ *  change" while the page advances a moment later. */
+export function mutationWaitExpression(maxMs, quietMs) {
+  return `(async () => {
+    const mo = new MutationObserver(() => { changed = true; last = Date.now(); });
+    let changed = false, last = 0;
+    mo.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    const t0 = Date.now();
+    try {
+      for (;;) {
+        const now = Date.now();
+        if (changed && now - last >= ${quietMs}) return true;
+        if (now - t0 >= ${maxMs}) return changed;
+        await new Promise((r) => setTimeout(r, 30));
+      }
+    } finally { mo.disconnect(); }
+  })()`;
+}
+
 /** Bounded in-page wait-for: expression or selector, single round trip. */
 export function waitForExpression(expression, timeoutMs) {
   return `(async () => {

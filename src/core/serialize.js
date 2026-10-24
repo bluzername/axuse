@@ -199,9 +199,15 @@ export function pageSerializer(opts) {
     // display:contents wrappers have no box but render their children.
     return getComputedStyle(el).display === "contents";
   }
+  // Item ownership for ax_observe {find}: every emitted line remembers the
+  // nearest enclosing article / list item / table row, so a match can be shown
+  // with ITS item instead of the neighbouring lines (which, in a flat list,
+  // belong to the previous item and invite clicking the wrong row's button).
+  var itemSeq = 0, curItem = 0, lineItem = [];
   function push(line) {
     if (chars + line.length > MAX_CHARS) { truncated = true; return; }
     lines.push(line);
+    lineItem.push(curItem);
     chars += line.length;
   }
   function emitText(t, depth, kind) {
@@ -238,6 +244,16 @@ export function pageSerializer(opts) {
   }
 
   function one(c, depth, quiet) {
+    var tg = c.tagName;
+    var rl = c.getAttribute ? c.getAttribute("role") : null;
+    if (tg === "ARTICLE" || tg === "LI" || tg === "TR" || rl === "article" || rl === "listitem" || rl === "row") {
+      var prevItem = curItem;
+      curItem = ++itemSeq;
+      try { visit(c, depth, quiet); } finally { curItem = prevItem; }
+    } else visit(c, depth, quiet);
+  }
+
+  function visit(c, depth, quiet) {
     var tag = c.tagName;
     if (SKIP[tag]) return;
     if (!visible(c)) return;
@@ -364,18 +380,18 @@ export function pageSerializer(opts) {
   // Drop label-echo text: a plain text line that merely repeats the name of
   // the adjacent element (label → control, legend → group) costs tokens and
   // invites the model to "click the label".
-  var out = [];
+  var out = [], outItem = [];
   for (var li = 0; li < lines.length; li++) {
     var L = lines[li];
-    if (typeof L === "string") { out.push(L); continue; }
+    if (typeof L === "string") { out.push(L); outItem.push(lineItem[li]); continue; }
     if (L.tl) {
       if (L.kind === "text") {
         var prev = lines[li - 1], next = lines[li + 1];
         var echo = function (o) { return o && typeof o === "object" && o.name && (o.name === L.t || o.name.indexOf(L.t + " ") === 0); };
         if (echo(prev) || echo(next)) continue;
       }
-      out.push(L.s); textLines.push(L.tl);
-    } else out.push(L.s);
+      out.push(L.s); outItem.push(lineItem[li]); textLines.push(L.tl);
+    } else { out.push(L.s); outItem.push(lineItem[li]); }
   }
   lines = out;
   return {
@@ -383,6 +399,7 @@ export function pageSerializer(opts) {
     url: location.href,
     title: clip(document.title),
     text: lines.join("\n"),
+    items: outItem,
     entries: entries,
     textLines: textLines,
     truncated: truncated,

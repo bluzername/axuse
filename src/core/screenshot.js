@@ -27,9 +27,18 @@ function approxBytes(b64) {
 export async function captureScreenshot(conn, sessionId, { crop, budgetBytes = DEFAULT_BUDGET_BYTES, quality = 80 } = {}) {
   const base = { format: "jpeg", quality, captureBeyondViewport: false };
   // Viewport geometry in CSS px. Clips are in document coordinates, so the
-  // scroll offset is added; scale 1 renders at CSS resolution regardless of
-  // devicePixelRatio, keeping image pixels == click coordinates.
+  // scroll offset is added. clip.scale multiplies ON TOP of devicePixelRatio
+  // (measured: a headed Chrome at DPR 1.25 returns a 1295x879 image for a
+  // 1036x703 viewport at scale 1; a DPR-2 retina screen returns 2x), so the
+  // scale is 1/DPR: image pixels == CSS pixels == click coordinates, which is
+  // exactly what the geometry note promises the model.
   let vp = { x: 0, y: 0, w: 0, h: 0 };
+  let dpr = 1;
+  try {
+    const r = await conn.send("Runtime.evaluate", { expression: "window.devicePixelRatio", returnByValue: true }, sessionId);
+    const v = Number(r?.result?.value);
+    if (Number.isFinite(v) && v > 0) dpr = v;
+  } catch {}
   try {
     const m = await conn.send("Page.getLayoutMetrics", {}, sessionId);
     const v = m.cssVisualViewport ?? m.visualViewport;
@@ -45,7 +54,7 @@ export async function captureScreenshot(conn, sessionId, { crop, budgetBytes = D
     region = { x, y, w, h };
   }
   if (region.w > 0 && region.h > 0) {
-    base.clip = { x: vp.x + region.x, y: vp.y + region.y, width: region.w, height: region.h, scale: 1 };
+    base.clip = { x: vp.x + region.x, y: vp.y + region.y, width: region.w, height: region.h, scale: 1 / dpr };
   }
   let res = await conn.send("Page.captureScreenshot", base, sessionId);
   let bytes = approxBytes(res.data);

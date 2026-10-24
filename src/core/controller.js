@@ -20,7 +20,7 @@ import {
   click as doClick, hover as doHover, drag as doDrag, wheel as doWheel,
   insertText, humanType, pressCombo, platformShortcut, planPointerJitter, selectAllCombo,
   refResolveExpression, selectOptionExpression, elementInfoExpression, fieldKindExpression, findOptionExpression,
-  sliderValueExpression, settleExpression, waitForExpression, MOD,
+  sliderValueExpression, settleExpression, mutationWaitExpression, waitForExpression, MOD,
 } from "./actuate.js";
 
 const URL_SCHEMES = /^(https?|file|about|data|blob):/i;
@@ -64,6 +64,18 @@ const RECORDED_EVENTS = new Set([
   "Runtime.consoleAPICalled", // error/warning only, filtered below
   "Log.entryAdded", // error level only, filtered below
 ]);
+
+/** Request types whose completion usually re-renders the page. Images, CSS,
+ *  fonts, media, sockets and beacons are not worth waiting for. */
+const NET_TRACKED = new Set(["XHR", "Fetch", "Document"]);
+/** A request in flight longer than this is a long-poll/stream, not a pending render. */
+const NET_LONGPOLL_MS = 3000;
+/** Upper bound on the post-action wait for page-triggered requests. */
+const netSettleCapMs = () => Math.max(0, Number(process.env.AXUSE_NET_SETTLE_MS ?? 2000));
+const netSettleEnabled = () => !/^(0|false|off|no)$/i.test(String(process.env.AXUSE_NET_SETTLE ?? "").trim()) && netSettleCapMs() > 0;
+/** How long an action that showed NO change keeps watching for a late one. */
+const lateChangeMs = () => Math.max(0, Number(process.env.AXUSE_LATE_CHANGE_MS ?? 450));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class Controller {
   constructor() {
@@ -262,6 +274,7 @@ export class Controller {
       clipped,
       refCount: entries.length,
       frameCount: frames.length,
+      items: res.items ?? null, // per main-frame line: id of its enclosing item (find mode)
       text,
     };
   }
@@ -330,13 +343,24 @@ export class Controller {
   }
 
   /** Post-action auto-observation. Never masks a successful action. */
-  async autoObserve(tab, settleMs) {
+  async autoObserve(tab, settleMs, { expectChange = false } = {}) {
     try {
       if (tab.dialog) return this.dialogNote(tab);
-      if (settleMs !== undefined && settleMs > 0) await this.raceDialog(tab, this.settle(tab, 4000, settleMs));
+      if (settleMs !== undefined && settleMs > 0) {
+        await this.raceDialog(tab, this.settle(tab, 4000, settleMs));
+        await this.raceDialog(tab, this.awaitNetworkIdle(tab));
+      }
       if (tab.dialog) return this.dialogNote(tab);
-      const obs = await this.raceDialog(tab, this.observation(tab, { mode: "diff" }));
+      let obs = await this.raceDialog(tab, this.observation(tab, { mode: "diff" }));
       if (tab.dialog) return this.dialogNote(tab);
+      // "No change" after a click is usually "not yet": a delayed render or a
+      // debounced request. Look once more before telling the agent nothing happened.
+      if (expectChange && typeof obs?.text === "string" && obs.text.startsWith("no changes detected") && lateChangeMs() > 0) {
+        if (await this.raceDialog(tab, this.awaitLateChange(tab, lateChangeMs()))) {
+          obs = await this.raceDialog(tab, this.observation(tab, { mode: "diff" }));
+          if (tab.dialog) return this.dialogNote(tab);
+        }
+      }
       return obs;
     } catch (e) {
       return { skipped: e.code ?? "ERROR", hint: "Call ax_observe." };
@@ -406,7 +430,26 @@ export class Controller {
         const tab = id ? this.tabs.get(id) : null;
         if (tab) activated = await this.ensureVisible(tab).catch(() => null);
       }
-      const result = await fn.call(this, args);
+      let result;
+      try {
+        result = await fn.call(this, args);
+      } catch (e) {
+        // A stale ref/state means the page moved on (re-render, step change).
+        // Hand back the CURRENT page in the same response so the agent does
+        // not spend a turn on ax_observe just to find out where it is.
+        if (e instanceof AxError && (e.code === Codes.REF_NOT_FOUND || e.code === Codes.STALE_STATE) && e.retry === "reobserve" && !e.facts?.fresh_observation) {
+          const id = args.tab_id ?? this.activeTabId;
+          const tab = id ? this.tabs.get(id) : null;
+          if (tab && !tab.closed && !tab.dialog) {
+            try {
+              const obs = await this.observation(tab, { mode: "full" });
+              e.facts = { ...(e.facts ?? {}), fresh_observation: obs.text, state_id: obs.state_id };
+              e.hint = "The page changed since your last observation. Its current state is included below: act on these refs; no ax_observe needed.";
+            } catch { /* keep the original error */ }
+          }
+        }
+        throw e;
+      }
       const meta = { elapsed_ms: Date.now() - started, ...(activated ? { tab_activated: true } : {}) };
       if (result && typeof result === "object") {
         if (entry.observed === "full") meta.observed = "full";
@@ -619,6 +662,7 @@ export class Controller {
     browser.tabs.add(tabId);
     this.activeTabId = tabId;
     this.attachEventRouting(tab);
+    void this.enableNetTracking(tab);
     this.startReaper();
     return tab;
   }
@@ -835,10 +879,76 @@ export class Controller {
         this.recordEvent(tab, "debugger.detached", { reason: msg.params?.reason ?? null });
         return;
       }
+      if (msg.sessionId === tab.sessionId && tab.net && msg.method?.startsWith("Network.")) {
+        this.trackNet(tab, msg.method, msg.params);
+        return;
+      }
       if (msg.sessionId !== tab.sessionId || !RECORDED_EVENTS.has(msg.method)) return;
       this.recordEvent(tab, msg.method, msg.params);
     });
     tab.offEventRouting = off;
+  }
+
+  /** In-flight XHR/fetch/document tracking for post-action settling. Passive:
+   *  nothing is injected into the page, only CDP Network events are counted.
+   *  AXUSE_NET_SETTLE=0 turns it off (then settling is timing-only). */
+  async enableNetTracking(tab) {
+    if (!netSettleEnabled()) return;
+    tab.net = { inflight: new Map(), seq: 0 };
+    try {
+      await tab.browser.handle.conn.send("Network.enable",
+        { maxTotalBufferSize: 1 << 20, maxResourceBufferSize: 1 << 18 }, tab.sessionId);
+    } catch { tab.net = null; }
+  }
+
+  trackNet(tab, method, params) {
+    const net = tab.net;
+    if (method === "Network.requestWillBeSent") {
+      if (NET_TRACKED.has(params?.type)) { net.inflight.set(params.requestId, Date.now()); net.seq++; }
+    } else if (method === "Network.loadingFinished" || method === "Network.loadingFailed") {
+      net.inflight.delete(params?.requestId);
+    }
+  }
+
+  /** True while a page-triggered request that is not a long-poll is pending. */
+  netBusy(tab) {
+    const net = tab.net;
+    if (!net) return false;
+    const now = Date.now();
+    for (const [id, t0] of net.inflight) {
+      if (now - t0 > NET_LONGPOLL_MS) net.inflight.delete(id);
+      else return true;
+    }
+    return false;
+  }
+
+  /** Wait (bounded) until the page's own requests have landed, then give the
+   *  render a beat. Returns whether it actually had to wait. */
+  async awaitNetworkIdle(tab, capMs = netSettleCapMs()) {
+    if (!tab.net || !this.netBusy(tab)) return false;
+    const t0 = Date.now();
+    while (this.netBusy(tab) && Date.now() - t0 < capMs) await sleep(30);
+    await sleep(90);
+    return true;
+  }
+
+  /** The action showed no change. Watch briefly for a late one: a DOM
+   *  mutation, or the page firing a request (debounced handlers). */
+  async awaitLateChange(tab, maxMs) {
+    const seq0 = tab.net?.seq ?? 0;
+    const mutation = this.evalInTab(tab, mutationWaitExpression(maxMs, 120), { awaitPromise: true }).then((v) => v === true, () => false);
+    const request = (async () => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < maxMs) {
+        if ((tab.net?.seq ?? 0) > seq0) { await this.awaitNetworkIdle(tab); return true; }
+        await sleep(30);
+      }
+      return false;
+    })();
+    return new Promise((resolve) => {
+      let pending = 2;
+      for (const p of [mutation, request]) p.then((v) => { if (v) resolve(true); else if (--pending === 0) resolve(false); });
+    });
   }
 
   async registerFrame(tab, { sessionId, targetInfo }) {
@@ -1090,27 +1200,45 @@ export class Controller {
    * little context, refs intact. The snapshot becomes the diff baseline, so
    * later actions still return proper diffs.
    */
-  async findObservation(tab, needle, { before = 2, after = 3, maxHits = 12 } = {}) {
+  async findObservation(tab, needle, { before = 2, after = 3, maxHits = 12, maxItemLines = 14 } = {}) {
     const obs = await this.observation(tab, { mode: "full", maxNodes: 2000, maxChars: 200000 });
     const lines = obs.text.split("\n");
     const head = lines.slice(0, 3);
     const body = lines.slice(3);
+    // Item ownership of each body line (0 = not inside an article/li/row).
+    // A flat list makes the line above a match belong to the PREVIOUS item;
+    // showing the match with its own item keeps its buttons attached to it.
+    const items = tab.lastSnapshot?.items ?? null;
+    const itemOf = (i) => (items && i < items.length ? items[i] : 0);
     const n = String(needle).toLowerCase();
     const keep = new Set();
     let hits = 0;
+    let grouped = false;
     body.forEach((l, i) => {
       if (hits >= maxHits || !l.toLowerCase().includes(n)) return;
       hits++;
-      for (let k = Math.max(0, i - before); k <= Math.min(body.length - 1, i + after); k++) keep.add(k);
+      const id = itemOf(i);
+      if (id) {
+        let lo = i, hi = i;
+        while (lo > 0 && itemOf(lo - 1) === id) lo--;
+        while (hi < body.length - 1 && itemOf(hi + 1) === id) hi++;
+        if (hi - lo + 1 > maxItemLines) { lo = Math.max(lo, i - before); hi = Math.min(hi, i + after + 3); }
+        for (let k = lo; k <= hi; k++) keep.add(k);
+        grouped = true;
+      } else {
+        for (let k = Math.max(0, i - before); k <= Math.min(body.length - 1, i + after); k++) keep.add(k);
+      }
     });
     const out = [];
     let last = -2;
     for (const i of [...keep].sort((x, y) => x - y)) {
       if (i !== last + 1 && out.length) out.push("  …");
+      else if (out.length && itemOf(i) !== itemOf(last)) out.push("  ·");
       out.push(body[i]);
       last = i;
     }
-    const text = [...head, `find "${needle}": ${hits ? `${hits} match${hits > 1 ? "es" : ""}` : "no matches"} (of ${body.length} lines)`, ...out].join("\n");
+    const note = grouped ? "; each match is shown with its own item" : "";
+    const text = [...head, `find "${needle}": ${hits ? `${hits} match${hits > 1 ? "es" : ""}` : "no matches"} (of ${body.length} lines${note})`, ...out].join("\n");
     return { ...obs, mode: "find", text };
   }
 
@@ -1141,7 +1269,7 @@ export class Controller {
       modifiers: this.modifierMask(a.modifiers),
       human: !!a.human,
     }));
-    const observation = await this.autoObserve(tab, a.settle_ms ?? 150);
+    const observation = await this.autoObserve(tab, a.settle_ms ?? 150, { expectChange: true });
     const popup = await this.popupReport(tab);
     const noChange = typeof observation?.text === "string" && observation.text.startsWith("no changes detected");
     return {
@@ -1150,7 +1278,7 @@ export class Controller {
       ...(pos.frame ? { frame: pos.frame } : {}),
       ...(pos.covered ? { note: `Target center is covered by a ${pos.hitTag ?? "element"} — the click landed on the overlay. Verify with the observation diff and re-plan if wrong.` } : {}),
       ...(noChange && !tab.fileChooser && !popup ? {
-        note: "No observable change. If the page was still settling (SPA/framework wiring listeners after load), one retry click is reasonable; otherwise the element may be a no-op in this state (e.g. an already-selected tab).",
+        note: "No observable change, even after waiting for the page to settle. Do not repeat this click blindly: it is likely a no-op in this state (e.g. an already-selected tab). If you expected a change, ax_observe to see the real page state; retry once only if the page had just loaded.",
       } : {}),
       observation,
       ...(popup ?? {}),
@@ -1363,7 +1491,7 @@ export class Controller {
     this.checkDialog(tab);
     const combo = a.platform ? platformShortcut(a.combo) : a.combo;
     await this.doSent(tab, () => pressCombo(this.ctx(tab), combo));
-    const observation = await this.autoObserve(tab, a.settle_ms ?? 150);
+    const observation = await this.autoObserve(tab, a.settle_ms ?? 150, { expectChange: true });
     return { action_sent: "sent", ...(combo !== a.combo ? { combo_sent: combo } : {}), observation, ...((await this.popupReport(tab)) ?? {}) };
   }
 
@@ -1465,7 +1593,7 @@ export class Controller {
       }
       throw new AxError(Codes.COMMAND_REJECTED, `Option "${a.value}" not found. Available: ${(res?.options ?? []).join(", ")}`, { retry: "never" });
     }
-    return { action_sent: "sent", value: res.value, observation: await this.autoObserve(tab, a.settle_ms ?? 150) };
+    return { action_sent: "sent", value: res.value, observation: await this.autoObserve(tab, a.settle_ms ?? 150, { expectChange: true }) };
   }
 
   async $drag(a) {

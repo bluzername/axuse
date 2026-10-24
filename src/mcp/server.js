@@ -13,19 +13,30 @@ import { Controller } from "../core/controller.js";
 import { renderResult } from "./render.js";
 
 // MCP server instructions: the usage contract in a few lines (the full
-// version is SKILL.md). Harnesses surface this to the model once.
-const INSTRUCTIONS = [
+// version is SKILL.md). Some harnesses (Codex) copy these into EVERY tool
+// description, so each line is paid for once per tool on every turn: the base
+// is kept minimal and situational guidance is added only when it applies.
+const BASE_INSTRUCTIONS = [
   "axuse: browser control via accessibility snapshots with element refs ([ref=e7]).",
-  "Workflow: ax_open → act on refs → read the diff each action returns (no need to re-observe). Pass the tab_id ax_open returned on every call: tabs are shared by all callers of this server, and tab_id is required once more than one tab is open.",
-  "Backend: ax_open defaults to the user's own signed-in Chrome when the axuse extension is connected (else a separate CDP-launched browser); the result reports backend.",
-  "For bounded source lists, use ax_open_many {urls:[...]} for compact title/status/excerpt results; it closes temporary tabs by default.",
-  "Forms: ONE ax_fill call with all fields (+submit). Big pages: ax_observe {find:\"text\"}. Infinite feeds/lazy lists: ax_scroll {until:\"text\"}.",
-  "New tabs/popups and JS dialogs opened by an action are reported in its result (answer dialogs with ax_dialog).",
-  "Screenshots only for pixels (canvas): then click {x,y} page coords.",
-  "When a verification widget (Turnstile/reCAPTCHA/hCaptcha/slider/interstitial) blocks a page you were asked to drive, call ax_solve_captcha {provider} or ax_challenge {op:\"solve\"} instead of abandoning the task; report the returned facts verbatim (LICENSE_INVALID / NO_SOLVER are expected outcomes the operator can act on).",
-  "Servers: on a display-less host axuse auto-boots a virtual display and keeps Chrome fully headed (anti-bot-safe) — never pass headless for challenge/anti-bot pages; the ax_open result reports the virtual display fact.",
-  "Capability plugins contribute extra tools (ax_vault, ax_net, ax_guard, ax_extract, …): ax_plugins lists them with their tool names.",
-].join("\n");
+  "Workflow: ax_open → act on refs → read the diff each action returns (no need to re-observe). Pass the tab_id ax_open returned on every call.",
+  "Forms: ONE ax_fill call with all fields (+submit). Big pages: ax_observe {find:\"text\"}. Lazy feeds: ax_scroll {until:\"text\"}. Source lists: ax_open_many {urls}.",
+  "New tabs and JS dialogs opened by an action are reported in its result (answer dialogs with ax_dialog). Screenshots only for canvas pixels.",
+];
+const SOLVER_INSTRUCTIONS =
+  "When a verification widget (Turnstile/reCAPTCHA/hCaptcha/slider/interstitial) blocks a page you were asked to drive, call ax_solve_captcha {provider} or ax_challenge {op:\"solve\"} instead of abandoning the task; report the returned facts verbatim (LICENSE_INVALID / NO_SOLVER are expected outcomes the operator can act on).";
+const SERVER_INSTRUCTIONS =
+  "Servers: on a display-less host axuse auto-boots a virtual display and keeps Chrome fully headed (anti-bot-safe) — never pass headless for challenge/anti-bot pages.";
+const PLUGIN_INSTRUCTIONS =
+  "Capability plugins contribute extra tools (ax_vault, ax_net, ax_guard, ax_extract, …): ax_plugins lists them with their tool names.";
+
+export function buildInstructions({ solvers = false, plugins = false, server = false } = {}) {
+  return [
+    ...BASE_INSTRUCTIONS,
+    ...(solvers ? [SOLVER_INSTRUCTIONS] : []),
+    ...(server ? [SERVER_INSTRUCTIONS] : []),
+    ...(plugins ? [PLUGIN_INSTRUCTIONS] : []),
+  ].join("\n");
+}
 import { AxError } from "../core/errors.js";
 import { browserTools, desktopTools, solverTools, pluginTools } from "./manifest.js";
 import { resolveDesktopDriver, desktopUnavailable } from "../desktop/index.js";
@@ -34,6 +45,16 @@ import { displayUsable, ensureVirtualDisplay, serverModeEnabled } from "../core/
 
 const VERSION = "0.1.0";
 const SUPPORTED_PROTOCOL = "2025-03-26";
+
+/** Typed error as JSON in the first block (stable for machine consumers); a
+ *  fresh page observation, when the controller attached one, rides along as a
+ *  second plain-text block (readable refs, not an escaped string). */
+function errorContent(json) {
+  const { fresh_observation: page, ...rest } = json;
+  return page
+    ? [{ type: "text", text: JSON.stringify(rest) }, { type: "text", text: page }]
+    : [{ type: "text", text: JSON.stringify(json) }];
+}
 
 /** `desktop` resolves once (the macOS driver is the one async case). */
 export async function createServer({ controller = new Controller(), desktop, solvers } = {}) {
@@ -62,6 +83,14 @@ export async function createServer({ controller = new Controller(), desktop, sol
   }
   const tools = [...browserTools(), ...desktopTools(!!driver, axCapable), ...solverTools(registry), ...pluginTools(registry)];
 
+  // The captcha line only matters once a solver is actually loaded; the
+  // ax_solve_captcha description already carries it for the no-plugin case.
+  const instructions = buildInstructions({
+    solvers: registry.length > 0,
+    plugins: registry.length > 0,
+    server: process.platform === "linux" && serverModeEnabled(),
+  });
+
   const byName = new Map(tools.map((t) => [t.name, t]));
 
   async function handleRequest(msg) {
@@ -73,7 +102,7 @@ export async function createServer({ controller = new Controller(), desktop, sol
             protocolVersion: typeof params.protocolVersion === "string" ? params.protocolVersion : SUPPORTED_PROTOCOL,
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: "axuse", version: VERSION },
-            instructions: INSTRUCTIONS,
+            instructions,
           });
         }        case "ping":
           return reply(id, {});
@@ -96,8 +125,10 @@ export async function createServer({ controller = new Controller(), desktop, sol
       // Structured errors become tool results, not protocol errors. Plugin
       // errors (AxError and plugin-typed errors like LICENSE_INVALID) carry
       // toJSON(); anything else is an internal string.
-      const text = (e instanceof AxError || typeof e.toJSON === "function") ? JSON.stringify(e.toJSON()) : `internal: ${e.message}`;
-      return reply(id, { content: [{ type: "text", text }], isError: true });
+      const content = (e instanceof AxError || typeof e.toJSON === "function")
+        ? errorContent(e.toJSON())
+        : [{ type: "text", text: `internal: ${e.message}` }];
+      return reply(id, { content, isError: true });
     }
   }
 
