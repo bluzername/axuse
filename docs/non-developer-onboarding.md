@@ -1,66 +1,92 @@
-# Axuse for journalists
+# Axuse for non-developers
 
 ## What this is
 
-Axuse lets Codex or ChatGPT Work use a browser for research: opening pages,
-searching, reading results, collecting links, and producing an evidence-backed
-brief.
+Axuse lets your AI assistant use a real web browser for you: opening pages,
+searching, reading results, filling in forms, collecting links and producing
+an evidence-backed answer. It works for journalists, researchers, sales,
+recruiting, operations and anyone else who uses Claude, ChatGPT or another AI
+agent at work.
 
-You do not need Git, Node.js, a terminal, or the Axuse source code.
-
-There is one important requirement: Axuse must first be provided as an official
-connector or signed desktop/browser installer by your organization. The source
-repository currently contains the developer setup, not a finished consumer
-installer. Do not download an unofficial browser extension.
+You do not need Git, a terminal, or the Axuse source code.
 
 ## One-time setup
 
-1. Install or enable the official Axuse connector supplied by your
-   organization. In ChatGPT Work this will normally be listed as an app or
-   connector. In Codex it may be supplied as a connector or desktop helper.
-2. Open Chrome and approve the Axuse browser permission when Chrome asks.
-   This is the one step that cannot safely be approved silently by an agent.
-3. Start a new Codex or ChatGPT Work conversation and paste the following
-   message.
+Pick the app you use. Your agent should ask which supported browser and
+profile you want to use, whether to install the browser extension, and
+whether you want optional desktop control.
 
-```text
-Set up Axuse for my browser research work.
+### Claude desktop app (Mac or Windows): one click
 
-Use only the official Axuse connector or installer that is already provided.
-Do not ask me to clone a repository, install Node.js, edit configuration files,
-or load an unpacked extension.
+1. Download **axuse.mcpb** from https://ax-use.com (the "Add to Claude"
+   button).
+2. Double-click the file. The Claude app opens and asks to install it.
+   Click **Install**. (If double-clicking does nothing: in Claude open
+   Settings → Extensions → Advanced settings → Install Extension, and pick
+   the file.)
+3. Choose your browser and profile with your agent. For your existing
+   signed-in Chrome or Edge profile, ask it to set up the axuse browser
+   extension too, following https://ax-use.com/install.md. This is separate
+   from the Claude desktop extension you just installed.
+4. Fully quit and reopen Claude, then start a new chat so its tools load.
+   If the agent cannot finish setup until after restarting, resume it then.
 
-Please:
+Claude includes everything axuse needs to run. You also need Google Chrome or
+Microsoft Edge; Windows already has Edge.
 
-1. Connect Axuse to my default Chrome browser.
-2. Start or configure any required Axuse bridge components.
-3. If Chrome or the operating system needs my approval, pause and tell me
-   exactly what to click.
-4. Verify the connection by opening https://example.com and reading its page
-   title and main content.
-5. Confirm which browser is connected and that Axuse can open pages and read
-   their content.
-6. From now on, automatically use Axuse whenever I ask you to search the web,
-   open a website, collect information, compare sources, or monitor news. I
-   should not need to mention Axuse again.
-7. Keep browser actions read-only unless I explicitly approve logging in,
-   submitting a form, downloading a file, publishing, or contacting someone.
+### ChatGPT (via the Codex app), Claude Code, Cursor or any other agent: one prompt
 
-Do not report success until the example.com test has passed.
-If Axuse is not installed or cannot be reached, explain that plainly and tell
-me what the administrator needs to install. Do not invent a successful setup.
-```
+ChatGPT Plus, Business and Enterprise include the Codex app, which can work on
+your computer. The ChatGPT chat window itself cannot install tools on your
+computer, so use Codex.
 
-The setup is complete when the assistant reports a successful `example.com`
-test. If it asks you to approve a browser permission, approve only the official
-Axuse extension or connector.
+1. Copy the install prompt from https://ax-use.com/#prompt (the full text is
+   also at https://ax-use.com/install.md).
+2. Paste it into Codex (or Claude Code, Cursor, OpenCode and so on).
+3. Choose your browser and default profile when asked. Your existing profile
+   holds logins for sites such as Airbnb and Google. Choose the Chrome or
+   Edge extension to use those sessions, or a separate profile to sign in
+   independently. The agent installs Node.js if needed, downloads Axuse and
+   registers it with your app.
+4. Follow the agent's extension and permission instructions below, then
+   fully quit and reopen the app or restart the CLI session. Most agents
+   need this to load a newly added MCP server; a new chat alone may not be
+   enough. If your app supports MCP reload, you can try that first.
+5. Ask the agent to resume setup and verify `example.com` in your chosen
+   browser and profile. Installation is complete only when that test works.
+
+If your AI cannot fetch web pages, paste the full prompt text rather than
+the link.
+
+## Browser extension and permissions
+
+For your existing Chrome or Edge profile, the agent registers the connection
+and opens the extensions page. Switch to the chosen profile, open
+`chrome://extensions` (Chrome) or `edge://extensions` (Edge), enable
+**Developer mode**, click **Load unpacked**, and select the exact folder the
+agent shows you. Keep that folder in place. The extension can control tabs
+and use the profile's signed-in sessions; review any permission prompt. Keep
+axuse enabled in only the selected running profile, because the bridge
+currently connects one profile at a time.
+
+Without the extension, a separate axuse profile starts signed out. Ask the
+agent to make it persistent if you want its logins to survive future tasks.
+
+On macOS, optional control of other desktop apps requires **System Settings →
+Privacy & Security → Accessibility** and **Screen Recording** (sometimes
+called **Screen & System Audio Recording**). Enable the app or executable
+identified by the system prompt, then reopen it if requested. Browser-only
+use does not require these desktop permissions. On Windows, follow any
+actual host or browser permission prompts. Linux supports browser tools;
+desktop control is not implemented.
 
 ## First test
 
 Try a small browser request first:
 
 ```text
-Open google.com and search for the latest news in the United States.
+Use axuse to visit google.com and find the latest stock price of Apple (AAPL).
+Include the currency, the quote's timestamp, and the source link.
 ```
 
 You should see Axuse open or use the browser. If the assistant answers from
@@ -149,13 +175,13 @@ snippet as proof when the underlying page is unavailable.
 
 ## If something goes wrong
 
-**“Axuse is not available.”** The official connector or desktop helper has not
-been installed, or the conversation was opened before it was installed. Ask
-the administrator to install Axuse, then start a new conversation.
+**“Axuse is not available.”** Fully quit and reopen your agent app or restart
+its CLI session, then start a new conversation. In Claude, check Settings → Extensions
+that axuse is turned on. In other agents, paste: “Check that axuse is
+installed and working, and fix it if not.”
 
-**The browser is not connected.** Open Chrome, make sure the official Axuse
-extension is enabled, and repeat the setup prompt. Do not install a second
-extension with a similar name.
+**“No browser found.”** Install Google Chrome from
+https://www.google.com/chrome/ and try again.
 
 **A page is blocked or requires a login.** Ask Axuse to record the URL and
 continue with accessible sources. Do not ask it to bypass a paywall, CAPTCHA,
@@ -164,9 +190,11 @@ or access control.
 **The answer has no URLs.** Ask: “Redo this using Axuse, show every source URL
 and publication date, and separate verified facts from your interpretation.”
 
-## For the person installing Axuse
+## For administrators
 
-The non-developer experience is only complete when Axuse is distributed as an
-official connector or signed installer. A repository checkout, a local
-`src/cli.js` path, manual MCP configuration, and Chrome’s **Load unpacked**
-workflow are developer setup steps and should not be given to journalists.
+- **Claude Team / Enterprise:** distribute `axuse.mcpb` through the
+  organization's desktop-extension allowlist so members get it without
+  downloading anything. Build it with `node tools/build-mcpb.mjs`.
+- **ChatGPT Business / Enterprise:** members use the Codex app with the install
+  prompt above. A one-click ChatGPT connector is in development.
+- Business use requires a commercial license: dev@ax-use.com.
